@@ -1,4 +1,0 @@
-my_python_node:
-  ros__parameters:
-    rate_hz: 5.0
-    greeting: "hello from YAML"

@@ -1,0 +1,15 @@
+arm_control_node:
+  ros__parameters:
+    # Robot Parameters
+    robot_type: "xarm6"
+    robot_ip: "192.168.1.201"
+    default_speed: 150  # mm/s
+    default_accel: 80   # mm/s^2
+
+    # Robot Poses
+    poses:
+      perception_pose: [400.0, 200.0, 325.0, -2.222, -0.245, -1.906]
+      bite_transfer_start_pose: [471.5, 0.0, 388.0, 0.0, -1.571, 3.141]
+      reset_pose: [471.5, 0.0, 388.0, 0.0, -1.571, 3.141]
+      
+ 

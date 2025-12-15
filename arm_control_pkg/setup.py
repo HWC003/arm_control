@@ -10,8 +10,8 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        ('share/' + package_name + '/launch', ['launch/demo.launch.py']),
-        ('share/' + package_name + '/config', ['config/defaults.yaml']),
+        ('share/' + package_name + '/launch', ['launch/arm_control.launch.py']),
+        ('share/' + package_name + '/config', ['config/arm_control.yaml']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -21,6 +21,7 @@ setup(
     license='Apache-2.0',
     entry_points={
         'console_scripts': [
+            'arm_controller = arm_control_pkg.arm_controller:main',
             'my_ros2_node_exec = arm_control_pkg.my_ros2_node:main',
             'my_service_server = arm_control_pkg.my_service_server:main',
             'my_service_client = arm_control_pkg.my_service_client:main',

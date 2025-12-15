@@ -1,6 +1,6 @@
 import rclpy
 from rclpy.node import Node
-from my_ros_python_pkg.my_python_library.sample_class import SampleClass, add_two_things
+from arm_control_pkg.my_python_library.sample_class import SampleClass, add_two_things
 
 class MyPythonNode(Node):
     def __init__(self):
