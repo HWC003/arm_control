@@ -3,8 +3,8 @@ arm_control_node:
     # Robot Parameters
     robot_type: "xarm6"
     robot_ip: "192.168.1.201"
-    default_speed: 150  # mm/s
-    default_accel: 80   # mm/s^2
+    default_speed: 80  # mm/s
+    default_accel: 50   # mm/s^2
 
     # Robot Poses
     poses:

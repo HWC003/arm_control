@@ -5,19 +5,20 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient, ActionServer, GoalResponse, CancelResponse
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import SingleThreadedExecutor
 from ament_index_python.packages import get_package_share_directory
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, String, Empty
 from geometry_msgs.msg import PointStamped
 from std_srvs.srv import SetBool
 from feeding_msgs.action import BiteTransfer
-from feeding_msgs.srv import RobotFeedback
+from feeding_msgs.msg import RobotFeedback
+from feeding_msgs.srv import CheckButtonState
 
 from gtts import gTTS
 from pydub import AudioSegment
 from pydub.playback import play
-from bite_transfer.bite_transfer.bite_transfer.ft_sensor_spoon import M8128TCPClient
-from bite_transfer.bite_transfer.bite_transfer.sri_sensor_recorder import SensorRecorder
+from bite_transfer.ft_sensor_spoon import M8128TCPClient
+from bite_transfer.sri_sensor_recorder import SensorRecorder
 
 from scipy.spatial.transform import Rotation as R
 from xarm.wrapper import XArmAPI
@@ -25,7 +26,7 @@ from xarm.wrapper import XArmAPI
 import quaternion
 import warnings
 
-from task_planner.task_planner.task_planner.text_to_speech import say
+from task_planner.text_to_speech import say
 warnings.filterwarnings("ignore", message=".*ALSA lib.*")
 
 """
@@ -38,7 +39,7 @@ class ArmController(Node):
         super().__init__('arm_controller_server')
         self._shutdown_requested = False
         
-        pkg_path = get_package_share_directory('arm_controller')
+        pkg_path = get_package_share_directory('arm_control_pkg')
 
         self.get_logger().info("Starting Arm Controller Action Server")
 
@@ -49,8 +50,8 @@ class ArmController(Node):
         self.robot_type = self.get_parameter('/robot_type').get_parameter_value().string_value
         self.robot_ip = self.get_parameter('/robot_ip').get_parameter_value().string_value
 
-        self.declare_parameter('/default_speed', 150)
-        self.declare_parameter('/default_accel', 80)
+        self.declare_parameter('/default_speed', 100)
+        self.declare_parameter('/default_accel', 50)
 
         self.default_speed = self.get_parameter('/default_speed').get_parameter_value().integer_value
         self.default_accel = self.get_parameter('/default_accel').get_parameter_value().integer_value
@@ -79,7 +80,6 @@ class ArmController(Node):
         # Initialize bite transfer params
         self.distance_to_mouth = 2.0
         self.exit_angle = 100
-        self.transfer_speed_param = 3
         self.entry_angle = 90
         self.height_offset = 0
 
@@ -97,10 +97,9 @@ class ArmController(Node):
         self.declare_parameter("spoon_length", 0.195)
         self._spoon_length = self.get_parameter("spoon_length").value
 
-        self.get_logger().info(f"Bite detection threshold set to: {self._bite_threshold}")
         self._min_transfer_speed = 30
         self._max_transfer_speed = 300
-        self._mvacc = 200
+        self._mvacc = 100
         self._mvacc_mouth = 100
         self._x_max = 720
         self._x_min = 500
@@ -116,6 +115,15 @@ class ArmController(Node):
         
         self.sub_target_pose = self.create_subscription(String, '/target_pose', self.pose_callback, 10)
         self.sub_pause_cmd = self.create_subscription(Bool, '/pause_cmd', self.pause_callback, 1)
+        self.sub_led_state = self.create_subscription(Bool, '/led_state', self.set_led_callback, 1)
+
+        # Service servers
+        self.check_button_state_srv = self.create_service(
+            CheckButtonState,
+            'check_button_state',
+            self.check_button_state_callback
+        )
+        self.get_logger().info("Check button state service created")
 
         # Service clients
         self._mouth_tracking_toggle_srv = self.create_client(SetBool, '/toggle_mouth_tracking')
@@ -133,7 +141,8 @@ class ArmController(Node):
         )
 
         self.is_paused = False
-        self.setup_arm()
+        self.setup_arm(True)
+        self.arm.set_cgpio_analog(1, 0.0)
 
     def setup_arm(self, reset=False):
         """
@@ -158,7 +167,7 @@ class ArmController(Node):
         self._impedance_control_enabled = False
 
         if reset:
-            self.pose_callback("reset")
+            self.pose_callback(String(data="reset"))
 
     def disconnect_arm(self, reset=False):
         """
@@ -183,6 +192,39 @@ class ArmController(Node):
         
         self.arm.disconnect()
 
+    def set_led_callback(self, msg):
+        led_state = msg.data
+        if led_state == True:
+            ret = self.arm.set_cgpio_analog(1, 8.0) #ON state
+        elif led_state == False:
+            ret = self.arm.set_cgpio_analog(1, 0.0) #OFF state
+        else:
+            pass
+        return ret
+    
+    def check_button_state_callback(self, request, response):
+        """
+        Service callback to check the button state.
+        Returns the C14 GPIO pin state (0 = pressed, 1 = not pressed).
+        """
+        try:
+            if request.check_state:
+                digital_inputs = self.arm.get_cgpio_digital()
+                # digital_inputs[1][0] is the C14 pin state
+                c14_state = digital_inputs[1][0]
+                response.button_state = c14_state
+                response.success = True
+                self.get_logger().debug(f"Button state: {c14_state}")
+            else:
+                response.button_state = -1
+                response.success = False
+        except Exception as e:
+            self.get_logger().error(f"Failed to check button state: {str(e)}")
+            response.button_state = -1
+            response.success = False
+        
+        return response
+        
     def setup_arm_impedance_control(self, enable=True):
         """
         Set up the xArm robot in impedance control mode.
@@ -262,52 +304,61 @@ class ArmController(Node):
         """
         self.mouth_status = msg.data
 
-    def pose_callback(self, pose):
+    def pose_callback(self, msg):
         """
         Move the robot to a given pose given the name of the pose
         pose: std_msgs/String
         """
+        pose = msg.data
         if self.is_paused:
             self.get_logger().warn("Ignoring new pose command because arm is currently paused")
         
+        self.arm.set_state(0)
+        current_state = self.arm.get_state()
+        self.get_logger().info(f"xArm current state code: {current_state}")
+        
         if pose == "perception":
             self.get_logger().info("Moving to Perception Pose...")
-            self.arm.set_position(*self._perception_pose, 
+            ret = self.arm.set_position(*self._perception_pose, 
                               speed=self.default_speed, 
                               mvacc=self.default_accel, 
-                              radius=0, 
-                              wait=False)
+                              radius=0, wait=True)
         elif pose == "transfer":
             self.get_logger().info("Moving to Bite Transfer Start Pose...")
-            self.arm.set_position(*self._transfer_pose, 
+            ret = self.arm.set_position(*self._transfer_pose, 
                               speed=self.default_speed, 
                               mvacc=self.default_accel, 
-                              radius=0, 
-                              wait=False)
+                              radius=0, wait=True)
         elif pose == "reset":
             self.get_logger().info("Moving to Reset Pose...")
-            self.arm.set_position(*self._reset_pose, 
+            ret = self.arm.set_position(*self._reset_pose, 
                             speed=self.default_speed, 
                             mvacc=self.default_accel, 
                             radius=0, wait=True)
         else:
             self.get_logger().warn("Invalid Pose name")
             pass
-        
-    def pause_callback(self, msg: Bool):
+
+        if ret != 0:
+            print("Failed to set position, error code:", ret)
+        else:
+            print("Move to pose successfully")
+
+    def pause_callback(self, msg):
         """
         Callback to handle stop/paused requests
         """
-        if msg.data is True and not self.is_paused:
+        paused = msg.data
+        if paused is True and not self.is_paused:
             self.get_logger().warn("PAUSE COMMAND RECEIVED: Stopping the arm immediately.")
             self.arm.set_state(3)
             self.is_paused=True
 
-        elif msg.data is False and self.is_paused:
+        elif paused is False and self.is_paused:
             self.get_logger().info("RESUME COMMAND RECEIVED: Enabling Motion.")
             self.arm.set_state(0)
 
-        elif msg.data is True and self.is_paused:
+        elif paused is True and self.is_paused:
             self.get_logger().info("ALREADY PAUSED: Doing Nothing")
         
         else:
@@ -712,7 +763,7 @@ class ArmController(Node):
         Args:
             wait (bool, optional): whether to wait for the arm to reach position. Defaults to True.
         """
-        arm_start_pose = self._transfer_pose.copy()
+        arm_start_pose = self._transfer_pose
         start_t = time.time()
         self.arm.set_position(x = arm_start_pose[0], 
                               y = arm_start_pose[1], 
@@ -880,6 +931,7 @@ class ArmController(Node):
             goal_handle.publish_feedback(feedback)
 
             self.setup_sri_ft_sensor()
+            self.setup_arm_impedance_control(enable=True) # Check if we need this
 
             req = SetBool.Request()
             req.data = True
@@ -893,8 +945,10 @@ class ArmController(Node):
             time.sleep(0.1)
 
             ft_data = np.array(self._sri_client.get_curr_data())
+            print(ft_data)
             if self._initial_reading is None:
                 self._initial_reading = ft_data.copy()
+                print("success")
             self._check_bite_initial_reading = ft_data - self._initial_reading
             self.get_logger().warn(f"Initial FT reading: {self._initial_reading[0:3]}")
 
@@ -969,20 +1023,14 @@ def main(args=None):
     rclpy.init(args=args)    
     ac = ArmController()
 
-    executor = MultiThreadedExecutor()
-    executor.add_node(ac)
-
     try:
-        executor.spin()
+        rclpy.spin(ac)
     except KeyboardInterrupt:
-        pass
-
-    ac.get_logger().info("Closing arm_controller")
-    ac.disconnect_arm()
-
-    executor.shutdown()
-    ac.destroy_node()
-    rclpy.shutdown()
+        ac.get_logger().info("Closing arm_controller")
+        ac.disconnect_arm()
+    finally:
+        ac.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == "__main__":
     main()
