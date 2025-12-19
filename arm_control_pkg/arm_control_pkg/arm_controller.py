@@ -30,11 +30,21 @@ from task_planner.text_to_speech import say
 warnings.filterwarnings("ignore", message=".*ALSA lib.*")
 
 """
-Handles the physical xArm6 robot arm 
-during the feeding sequence
+Handles the physical xArm6 robot arm during the feeding sequence.
+
+Organized into sections:
+1. Initialization & ROS Setup
+2. General xArm Functions
+3. Bite Transfer Functions
+4. FT Sensor Functions
+5. Utility & Transform Functions
 """
 
 class ArmController(Node):
+    # ============================================================================
+    # INITIALIZATION & ROS SETUP
+    # ============================================================================
+    
     def __init__(self):
         super().__init__('arm_controller_server')
         self._shutdown_requested = False
@@ -144,6 +154,10 @@ class ArmController(Node):
         self.setup_arm(True)
         self.arm.set_cgpio_analog(1, 0.0)
 
+    # ============================================================================
+    # GENERAL xArm FUNCTIONS
+    # ============================================================================
+
     def setup_arm(self, reset=False):
         """
         Set up the xArm6 Robot arm
@@ -191,118 +205,6 @@ class ArmController(Node):
             self.arm.reset(wait=True)
         
         self.arm.disconnect()
-
-    def set_led_callback(self, msg):
-        led_state = msg.data
-        if led_state == True:
-            ret = self.arm.set_cgpio_analog(1, 8.0) #ON state
-        elif led_state == False:
-            ret = self.arm.set_cgpio_analog(1, 0.0) #OFF state
-        else:
-            pass
-        return ret
-    
-    def check_button_state_callback(self, request, response):
-        """
-        Service callback to check the button state.
-        Returns the C14 GPIO pin state (0 = pressed, 1 = not pressed).
-        """
-        try:
-            if request.check_state:
-                digital_inputs = self.arm.get_cgpio_digital()
-                # digital_inputs[1][0] is the C14 pin state
-                c14_state = digital_inputs[1][0]
-                response.button_state = c14_state
-                response.success = True
-                self.get_logger().debug(f"Button state: {c14_state}")
-            else:
-                response.button_state = -1
-                response.success = False
-        except Exception as e:
-            self.get_logger().error(f"Failed to check button state: {str(e)}")
-            response.button_state = -1
-            response.success = False
-        
-        return response
-        
-    def setup_arm_impedance_control(self, enable=True):
-        """
-        Set up the xArm robot in impedance control mode.
-        """
-        # Set tool impedance parameters:
-        K_POS = 150         #  x/y/z linear stiffness coefficient, range: 0 ~ 2000 (N/m)
-        K_ORI = 4           #  Rx/Ry/Rz rotational stiffness coefficient, range: 0 ~ 20 (Nm/rad)
-
-        # Attention: for M and J, smaller value means less effort to drive the arm, but may also be less stable, please be careful. 
-        M = float(0.06)  #  x/y/z equivalent mass; range: 0.02 ~ 1 kg
-        J = M * 0.01     #  Rx/Ry/Rz equivalent moment of inertia, range: 1e-4 ~ 0.01 (Kg*m^2)
-
-        C_AXIS = [0,1,1,0,0,0]  # set z axis as compliant axis
-        REF_FRAME = 0           # 0 : base , 1 : tool
-
-        self.arm.set_impedance_mbk([M, M, M, J, J, J], [K_POS, K_POS, K_POS, K_ORI, K_ORI, K_ORI], [0]*6) # B(damping) is reserved, give zeros
-        self.arm.set_impedance_config(REF_FRAME, C_AXIS)
-        
-        # Enable ft sensor communication
-        self.arm.ft_sensor_enable(1)
-        self._ft_sensor_enabled = True
-
-        if enable:
-            self.enable_impedance_control()
-            print("Impedance control setup and enabled.")
-        time.sleep(0.1)
-    
-    def enable_impedance_control(self):
-        self.arm.ft_sensor_app_set(1)
-        self.arm.set_state(0)        # Will start impedance mode after set_state(0)
-        self._impedance_control_enabled = True
-        self.get_logger().warn("Enabled impedance control")
-
-    def disable_impedance_control(self):
-        self.arm.ft_sensor_app_set(0)
-        self.arm.set_state(0)       
-        self._impedance_control_enabled = False
-        print("Disabled impedance control")
-
-    def setup_sri_ft_sensor(self, ip="192.168.1.108", port=4008):
-        """
-        Initialises the external SRI force-torque sensor
-
-        Args:
-            ip (str, optional): IP address of ft sensor. Defaults to "192.168.1.108".
-            port (int, optional): Port number of ft sensor. Defaults to 4008.
-
-        Raises:
-            Exception: If connection to the sensor fails.
-        """        
-        self._sri_client = M8128TCPClient(ip, port, sampling_rate=200)
-
-        if not self._sri_client._is_connected:
-            raise Exception("Failed to connect to SRI FT sensor")
-    
-    def disconnect_sri_ft_sensor(self):
-        """
-        Disconnects the external_force_torque sensor.
-        """
-        self._sri_client.close_tcp()
-
-    def point_callback(self, msg):
-        """
-        Extracts the x, y, z values of the mouth pose from the /transformed_point topic.
-
-        Args:
-            msg (PointStamped): PointStamped message containing x, y, z values.
-        """            
-        self.point_x, self.point_y, self.point_z = msg.point.x, msg.point.y, msg.point.z
-        self.latest_mouth_point = msg.point
-
-    def mouth_status_callback(self, msg):
-        """Determines if the mouth is closed or opened from the /mouth_status topic.
-
-        Args:
-            msg (String): String message containing mouth status.
-        """
-        self.mouth_status = msg.data
 
     def pose_callback(self, msg):
         """
@@ -364,6 +266,43 @@ class ArmController(Node):
         else:
             pass
 
+    def set_led_callback(self, msg):
+        led_state = msg.data
+        if led_state == True:
+            ret = self.arm.set_cgpio_analog(1, 8.0) #ON state
+        elif led_state == False:
+            ret = self.arm.set_cgpio_analog(1, 0.0) #OFF state
+        else:
+            pass
+        return ret
+    
+    def check_button_state_callback(self, request, response):
+        """
+        Service callback to check the button state.
+        Returns the C14 GPIO pin state (0 = pressed, 1 = not pressed).
+        """
+        try:
+            if request.check_state:
+                digital_inputs = self.arm.get_cgpio_digital()
+                # digital_inputs[1][0] is the C14 pin state
+                c14_state = digital_inputs[1][0]
+                response.button_state = c14_state
+                response.success = True
+                self.get_logger().debug(f"Button state: {c14_state}")
+            else:
+                response.button_state = -1
+                response.success = False
+        except Exception as e:
+            self.get_logger().error(f"Failed to check button state: {str(e)}")
+            response.button_state = -1
+            response.success = False
+        
+        return response
+
+    # ============================================================================
+    # BITE TRANSFER FUNCTIONS
+    # ============================================================================
+
     def goal_callback(self, goal_request):
         self.get_logger().info('Received bite transfer goal request')
         return GoalResponse.ACCEPT  
@@ -371,6 +310,117 @@ class ArmController(Node):
     def cancel_callback(self, goal_handle):
         self.get_logger().info('Received request to cancel bite transfer goal')
         return CancelResponse.ACCEPT
+
+    def execute_bite_transfer_cb(self, goal_handle):
+        """Execute callback for the action server (continuous mouth tracking)."""
+        
+        feedback = BiteTransfer.Feedback()
+        result = BiteTransfer.Result()
+
+        try:
+            goal = goal_handle.request
+
+            self.distance_to_mouth = goal.distance_to_mouth
+            self.exit_angle = goal.exit_angle
+            alpha = (goal.transfer_speed - 1) / 4
+            self.transfer_speed = self._min_transfer_speed * ((self._max_transfer_speed / self._min_transfer_speed) ** alpha)
+            self.transfer_speed = np.clip(self.transfer_speed, self._min_transfer_speed, self._max_transfer_speed)
+            self.height_offset = goal.height_offset
+            if goal.entry_angle != 0:
+                self.entry_angle = goal.entry_angle
+
+            self.get_logger().info(f"Start signal received. Beginning bite transfer at {self.transfer_speed:.2f} mm/s")
+            feedback.status = "Bite transfer started."
+            goal_handle.publish_feedback(feedback)
+
+            self.setup_sri_ft_sensor()
+            self.setup_arm_impedance_control(enable=True) # Check if we need this
+
+            req = SetBool.Request()
+            req.data = True
+            future = self._mouth_tracking_toggle_srv.call_async(req)
+            rclpy.spin_until_future_complete(self, future)
+            resp = future.result()
+
+            self.move_to_start()
+            self.arm.set_mode(7)
+            self.arm.set_state(0)
+            time.sleep(0.1)
+
+            ft_data = np.array(self._sri_client.get_curr_data())
+            print(ft_data)
+            if self._initial_reading is None:
+                self._initial_reading = ft_data.copy()
+                print("success")
+            self._check_bite_initial_reading = ft_data - self._initial_reading
+            self.get_logger().warn(f"Initial FT reading: {self._initial_reading[0:3]}")
+
+            self.give_feedback(message="I will feed you now", level="info")
+            self._feedback_given = False
+            self._bite_detected = False
+            
+            self.wait_for_point()
+
+            if self._impedance_control:
+                ret = self.impedance_move_to_point()
+            else:
+                ret = self.admittance_move_to_point()
+
+            if ret:
+                self.get_logger().info("Mouth servoing completed. Mouth point reached or bite detected.")
+            else:
+                self.get_logger().warn("Robot failed to reach mouth point")
+                raise Exception("Failed to reach mouth point")
+            
+            self.arm.set_mode(0)
+            self.arm.set_state(0)  
+
+            if not self._bite_detected:
+                self.give_feedback(message="You may take a bite now", level="info")
+                self.get_logger().info("Checking for bite")
+
+                self._check_bite_initial_reading = None
+                while rclpy.ok():                
+                    if self.check_for_bite(disable_impedance=True):
+                        self._check_bite_initial_reading = None                        
+                        break
+            else:
+                self.get_logger().info("Bite detected before reaching mouth point")
+            
+            self.move_to_exit_point()
+            self.get_logger().info("Successfully moved to exit point")
+            self.move_to_start()
+
+            result.success = True
+            goal_handle.succeed()
+            feedback.status = "Bite transfer completed successfully"
+            goal_handle.publish_feedback(feedback)
+            return result
+
+        except Exception as e:
+            self.get_logger().error(f"Bite transfer failed: {e}")
+            feedback.status = f"Error: {e}"
+            result.success = False
+            goal_handle.abort()
+            return result
+
+        finally:
+            try:
+                self._bite_detected = False
+                req = SetBool.Request()
+                req.data = False
+                future = self._mouth_tracking_toggle_srv.call_async(req)
+                rclpy.spin_until_future_complete(self, future)
+                resp = future.result()
+
+                if hasattr(self, 'sensor_recorder'):
+                    self.sensor_recorder.stop()
+
+                self.disconnect_sri_ft_sensor()
+                time.sleep(0.1)
+                self.get_logger().info("Completed bite transfer, cleaned up.")
+            except Exception as e:
+                self.get_logger().error(f"Error during cleanup: {e}")
 
     def give_feedback(self, message, level, audio=True):
         """Publishes feedback to the robot_feedback topic for the WebApp and optionally plays audio.
@@ -385,6 +435,227 @@ class ArmController(Node):
             if audio_thread is not None:
                 audio_thread.join()
 
+    def point_callback(self, msg):
+        """
+        Extracts the x, y, z values of the mouth pose from the /transformed_point topic.
+
+        Args:
+            msg (PointStamped): PointStamped message containing x, y, z values.
+        """            
+        self.point_x, self.point_y, self.point_z = msg.point.x, msg.point.y, msg.point.z
+        self.latest_mouth_point = msg.point
+
+    def mouth_status_callback(self, msg):
+        """Determines if the mouth is closed or opened from the /mouth_status topic.
+
+        Args:
+            msg (String): String message containing mouth status.
+        """
+        self.mouth_status = msg.data
+
+    def wait_for_point(self):
+        """
+        Waits for a point to be received (ie mouth is detected)
+        """
+        rate = self.create_rate(10)
+        while self.point_x is None and rclpy.ok():
+            self.get_logger().warn("Waiting for point...")
+            if not self._feedback_given:
+                self.give_feedback("Mouth not detected! Please ensure you are in the frame", level="warn")
+                self._feedback_given = True
+            rate.sleep()
+        return None
+
+    def move_to_entry_point(self):
+        """Moves to the entry point.
+        """         
+        current_position = self.arm.get_position()[1]
+        print("Current EEF pose (rpy):", current_position)
+
+        entry_angle = self.entry_angle
+        spoon_offset = np.array([0, 0, self._spoon_length*1000])
+
+        final_pose_rpy = self.calculate_entry_exit_pose(current_position, entry_angle, spoon_offset)
+        print("Final EEF pose (rpy):", final_pose_rpy)
+                
+        self.arm.set_position(
+            x=final_pose_rpy[0],
+            y=final_pose_rpy[1],
+            z=final_pose_rpy[2] + self.height_offset,
+            roll=final_pose_rpy[3],
+            pitch=final_pose_rpy[4],
+            yaw=final_pose_rpy[5],
+            speed=self.transfer_speed,
+            mvacc=self._mvacc_mouth,
+            radius=0,
+            wait=False
+        )
+        time.sleep(1)
+        print("Moved to entry point")
+
+    def move_to_exit_point(self):
+        """
+        Command the robot to move to the exit point after a bite is detected.
+        """
+        if self._impedance_control:
+            if not self._impedance_control_enabled:
+                self.enable_impedance_control()
+
+        current_position = self.arm.get_position()[1]
+        print("Current EEF pose (rpy):", current_position)
+        
+        exit_angle = self.exit_angle
+        spoon_offset = np.array([0, 0, self._spoon_length*1000])
+
+        final_pose_rpy = self.calculate_entry_exit_pose(current_position, exit_angle, spoon_offset)
+        print("Final EEF pose (rpy):", final_pose_rpy)
+        
+        self.arm.set_position(
+            x=final_pose_rpy[0] - 40,
+            y=final_pose_rpy[1],
+            z=final_pose_rpy[2],
+            roll=final_pose_rpy[3],
+            pitch=final_pose_rpy[4],
+            yaw=final_pose_rpy[5],
+            speed=self.transfer_speed,
+            mvacc=self._mvacc_mouth,
+            radius=0,
+            wait=True
+        )
+
+    def move_to_start(self, wait = True):
+        """Moves to start position before commencing feeding.
+
+        Args:
+            wait (bool, optional): whether to wait for the arm to reach position. Defaults to True.
+        """
+        arm_start_pose = self._transfer_pose
+        start_t = time.time()
+        self.arm.set_position(x = arm_start_pose[0], 
+                              y = arm_start_pose[1], 
+                              z = arm_start_pose[2], 
+                              roll = arm_start_pose[3], 
+                              pitch = arm_start_pose[4], 
+                              yaw = arm_start_pose[5], 
+                              speed = self.transfer_speed, 
+                              mvacc = self._mvacc, 
+                              radius = 0, 
+                              wait = True)
+        
+        print(f"Moved to start position in {time.time() - start_t:.2f} seconds")
+
+    def impedance_move_to_point(self):
+        """
+        Moves the robot to a target point using impedance control. 
+        """
+        margin_of_error_time = 1.0
+        last_time_in_margin = None
+        curr_mouth_target_pose = None
+        mouth_undetected_start_t = None
+        mouth_too_far_start_t = None
+        mouth_far_warn_time = None
+        mouth_too_close_start_t = None
+        mouth_close_warn_time = None
+        mouth_detected = False
+
+        try:
+            while rclpy.ok():
+                rclpy.spin_once(self)
+                base_x, base_y, base_z = self.point_x, self.point_y, self.point_z
+                quat = np.array(self.rpy_to_quaternion(3.141, -1.57, 0))
+                points = [base_x, base_y, base_z, quat[3], quat[0], quat[1], quat[2]]
+                points_world = self.get_eef_pose_from_spoon_pose(points, np.array([0, 0, self._spoon_length]))
+
+                base_x, base_y, base_z = points_world[0]*1000, points_world[1]*1000, points_world[2]*1000
+
+                if self.mouth_status in ["Open", "Closed"]:
+                    curr_mouth_target_pose = np.array([base_x- (self.distance_to_mouth*10), base_y, base_z, 3.141, -1.57, 0])
+                    
+                    if curr_mouth_target_pose[0] > self._x_max:
+                        if mouth_too_far_start_t is None:
+                            self.get_logger().warn("Mouth detected but too far away... ")
+                            mouth_too_far_start_t = time.time()
+                                
+                        if (mouth_far_warn_time is None) or (time.time() - mouth_far_warn_time > 5.0):   
+                            self.give_feedback("You are too far away! Please move closer", level="warn")
+                            mouth_far_warn_time = time.time()
+
+                        mouth_detected = False
+                        curr_mouth_target_pose[0] = self._x_max - 50
+                    
+                    elif curr_mouth_target_pose[0] < self._x_min:
+                        if mouth_too_close_start_t is None:
+                            self.get_logger().warn("Mouth detected but too close... ")
+                            mouth_too_close_start_t = time.time()
+                                
+                        if (mouth_close_warn_time is None) or (time.time() - mouth_close_warn_time > 5.0):   
+                            self.give_feedback("You are too close to me! Please move back", level="warn")
+                            mouth_close_warn_time = time.time()
+
+                        curr_mouth_target_pose[0] = self._x_min
+                        mouth_detected = False
+                    
+                    elif curr_mouth_target_pose[2] > self._z_max:
+                        self.get_logger().warn("3ddfa likely hallucinating with very high z")
+                        mouth_detected = False
+                        curr_mouth_target_pose[2] = self._z_max
+
+                    else:
+                        mouth_detected = True
+                        mouth_undetected_start_t = None
+                        mouth_too_far_start_t = None
+                        mouth_too_close_start_t = None
+
+                else:
+                    mouth_detected = False
+                    curr_mouth_target_pose = self.arm.get_position()[1]
+                    if mouth_undetected_start_t is None:
+                        self.get_logger().warn("Mouth not detected. Waiting for mouth to be detected...")
+                        self.give_feedback("Mouth not detected! Please ensure you are in the frame", level="warn")
+                        mouth_undetected_start_t = time.time()
+                    elif time.time() - mouth_undetected_start_t >= 30.0:
+                        self.get_logger().warn("Mouth not detected for too long. Stopping movement.")
+                        self.give_feedback("Mouth not detected for too long! Exiting...", level="warn")
+                        return False
+
+                target_pose = curr_mouth_target_pose.copy()
+                print("Moving to target pose:", target_pose)
+                ret = self.arm.set_position(
+                        x=target_pose[0], y=target_pose[1], z=target_pose[2],
+                        roll=target_pose[3], pitch=target_pose[4], yaw=target_pose[5],
+                        speed=self.transfer_speed, 
+                        mvacc=self._mvacc_mouth,
+                        wait=False
+                    )
+                
+                if ret != 0:
+                    print("Error occurred while moving the robot.")
+                    return False
+                
+                if self.check_for_bite():
+                    self._bite_detected = True
+                    self._check_bite_initial_reading = None
+                    return True
+
+                if mouth_detected:
+                    current_pose = self.arm.get_position()[1]
+
+                    within_margin = all(
+                        abs(current_pose[i] - target_pose[i]) < self.margin_of_error for i in range(3)
+                    )
+                    if within_margin:
+                        if last_time_in_margin is None:
+                            last_time_in_margin = time.time()
+                        elif time.time() - last_time_in_margin >= margin_of_error_time:
+                            self.get_logger().info("Target point reached and stable. Impedance control loop finished.")
+                            return True
+                    else:
+                        last_time_in_margin = None
+
+        except KeyboardInterrupt:
+            self.get_logger().warn("Exiting impedance control loop due to interrupt.")
+
+    # UNUSED: Admittance control is not currently used, impedance control is preferred
     def admittance_controller(self, ft_data):
         """Applies admittance control to adjust the target pose based on force-torque sensor data. 
 
@@ -420,6 +691,7 @@ class ArmController(Node):
 
         return delta_pos, delta_ori
 
+    # UNUSED: Admittance control is not currently used, impedance control is preferred
     def admittance_move_to_point(self):
         """
         Moves the robot to a target point using admittance control. 
@@ -541,139 +813,81 @@ class ArmController(Node):
         except KeyboardInterrupt:
             self.get_logger().warn("Exiting admittance control loop due to interrupt.")
 
-    def impedance_move_to_point(self):
+    # ============================================================================
+    # FT SENSOR FUNCTIONS
+    # ============================================================================
+        
+    def setup_arm_impedance_control(self, enable=True):
         """
-        Moves the robot to a target point using impedance control. 
+        Set up the xArm robot in impedance control mode.
         """
-        margin_of_error_time = 1.0
-        last_time_in_margin = None
-        curr_mouth_target_pose = None
-        mouth_undetected_start_t = None
-        mouth_too_far_start_t = None
-        mouth_far_warn_time = None
-        mouth_too_close_start_t = None
-        mouth_close_warn_time = None
-        mouth_detected = False
+        # Set tool impedance parameters:
+        K_POS = 150         #  x/y/z linear stiffness coefficient, range: 0 ~ 2000 (N/m)
+        K_ORI = 4           #  Rx/Ry/Rz rotational stiffness coefficient, range: 0 ~ 20 (Nm/rad)
 
-        try:
-            while rclpy.ok():
-                rclpy.spin_once(self)
-                base_x, base_y, base_z = self.point_x, self.point_y, self.point_z
-                quat = np.array(self.rpy_to_quaternion(3.141, -1.57, 0))
-                points = [base_x, base_y, base_z, quat[3], quat[0], quat[1], quat[2]]
-                points_world = self.get_eef_pose_from_spoon_pose(points, np.array([0, 0, self._spoon_length]))
+        # Attention: for M and J, smaller value means less effort to drive the arm, but may also be less stable, please be careful. 
+        M = float(0.06)  #  x/y/z equivalent mass; range: 0.02 ~ 1 kg
+        J = M * 0.01     #  Rx/Ry/Rz equivalent moment of inertia, range: 1e-4 ~ 0.01 (Kg*m^2)
 
-                base_x, base_y, base_z = points_world[0]*1000, points_world[1]*1000, points_world[2]*1000
+        C_AXIS = [0,1,1,0,0,0]  # set z axis as compliant axis
+        REF_FRAME = 0           # 0 : base , 1 : tool
 
-                if self.mouth_status in ["Open", "Closed"]:
-                    curr_mouth_target_pose = np.array([base_x- (self.distance_to_mouth*10), base_y, base_z, 3.141, -1.57, 0])
-                    
-                    if curr_mouth_target_pose[0] > self._x_max:
-                        if mouth_too_far_start_t is None:
-                            self.get_logger().warn("Mouth detected but too far away... ")
-                            mouth_too_far_start_t = time.time()
-                                
-                        if (mouth_far_warn_time is None) or (time.time() - mouth_far_warn_time > 5.0):   
-                            self.give_feedback("You are too far away! Please move closer", level="warn")
-                            mouth_far_warn_time = time.time()
+        self.arm.set_impedance_mbk([M, M, M, J, J, J], [K_POS, K_POS, K_POS, K_ORI, K_ORI, K_ORI], [0]*6) # B(damping) is reserved, give zeros
+        self.arm.set_impedance_config(REF_FRAME, C_AXIS)
+        
+        # Enable ft sensor communication
+        self.arm.ft_sensor_enable(1)
+        self._ft_sensor_enabled = True
 
-                        mouth_detected = False
-                        curr_mouth_target_pose[0] = self._x_max - 50
-                    
-                    elif curr_mouth_target_pose[0] < self._x_min:
-                        if mouth_too_close_start_t is None:
-                            self.get_logger().warn("Mouth detected but too close... ")
-                            mouth_too_close_start_t = time.time()
-                                
-                        if (mouth_close_warn_time is None) or (time.time() - mouth_close_warn_time > 5.0):   
-                            self.give_feedback("You are too close to me! Please move back", level="warn")
-                            mouth_close_warn_time = time.time()
+        if enable:
+            self.enable_impedance_control()
+            print("Impedance control setup and enabled.")
+        time.sleep(0.1)
+    
+    def enable_impedance_control(self):
+        self.arm.ft_sensor_app_set(1)
+        self.arm.set_state(0)        # Will start impedance mode after set_state(0)
+        self._impedance_control_enabled = True
+        self.get_logger().warn("Enabled impedance control")
 
-                        curr_mouth_target_pose[0] = self._x_min
-                        mouth_detected = False
-                    
-                    elif curr_mouth_target_pose[2] > self._z_max:
-                        self.get_logger().warn("3ddfa likely hallucinating with very high z")
-                        mouth_detected = False
-                        curr_mouth_target_pose[2] = self._z_max
+    def disable_impedance_control(self):
+        self.arm.ft_sensor_app_set(0)
+        self.arm.set_state(0)       
+        self._impedance_control_enabled = False
+        print("Disabled impedance control")
 
-                    else:
-                        mouth_detected = True
-                        mouth_undetected_start_t = None
-                        mouth_too_far_start_t = None
-                        mouth_too_close_start_t = None
-
-                else:
-                    mouth_detected = False
-                    curr_mouth_target_pose = self.arm.get_position()[1]
-                    if mouth_undetected_start_t is None:
-                        self.get_logger().warn("Mouth not detected. Waiting for mouth to be detected...")
-                        self.give_feedback("Mouth not detected! Please ensure you are in the frame", level="warn")
-                        mouth_undetected_start_t = time.time()
-                    elif time.time() - mouth_undetected_start_t >= 30.0:
-                        self.get_logger().warn("Mouth not detected for too long. Stopping movement.")
-                        self.give_feedback("Mouth not detected for too long! Exiting...", level="warn")
-                        return False
-
-                target_pose = curr_mouth_target_pose.copy()
-                print("Moving to target pose:", target_pose)
-                ret = self.arm.set_position(
-                        x=target_pose[0], y=target_pose[1], z=target_pose[2],
-                        roll=target_pose[3], pitch=target_pose[4], yaw=target_pose[5],
-                        speed=self.transfer_speed, 
-                        mvacc=self._mvacc_mouth,
-                        wait=False
-                    )
-                
-                if ret != 0:
-                    print("Error occurred while moving the robot.")
-                    return False
-                
-                if self.check_for_bite():
-                    self._bite_detected = True
-                    self._check_bite_initial_reading = None
-                    return True
-
-                if mouth_detected:
-                    current_pose = self.arm.get_position()[1]
-
-                    within_margin = all(
-                        abs(current_pose[i] - target_pose[i]) < self.margin_of_error for i in range(3)
-                    )
-                    if within_margin:
-                        if last_time_in_margin is None:
-                            last_time_in_margin = time.time()
-                        elif time.time() - last_time_in_margin >= margin_of_error_time:
-                            self.get_logger().info("Target point reached and stable. Impedance control loop finished.")
-                            return True
-                    else:
-                        last_time_in_margin = None
-
-        except KeyboardInterrupt:
-            self.get_logger().warn("Exiting impedance control loop due to interrupt.")
-
-    def wait_for_point(self):
+    def setup_sri_ft_sensor(self, ip="192.168.1.108", port=4008):
         """
-        Waits for a point to be received (ie mouth is detected)
+        Initialises the external SRI force-torque sensor
+
+        Args:
+            ip (str, optional): IP address of ft sensor. Defaults to "192.168.1.108".
+            port (int, optional): Port number of ft sensor. Defaults to 4008.
+
+        Raises:
+            Exception: If connection to the sensor fails.
+        """        
+        self._sri_client = M8128TCPClient(ip, port, sampling_rate=200)
+
+        if not self._sri_client._is_connected:
+            raise Exception("Failed to connect to SRI FT sensor")
+    
+    def disconnect_sri_ft_sensor(self):
         """
-        rate = self.create_rate(10)
-        while self.point_x is None and rclpy.ok():
-            self.get_logger().warn("Waiting for point...")
-            if not self._feedback_given:
-                self.give_feedback("Mouth not detected! Please ensure you are in the frame", level="warn")
-                self._feedback_given = True
-            rate.sleep()
-        return None
-                
+        Disconnects the external_force_torque sensor.
+        """
+        self._sri_client.close_tcp()
+
     def check_for_bite(self, disable_impedance=False):
         """Check for a bite based on force-torque sensor data.
 
         Args:
-            disable_impedance (bool, optional): Whether to disable impedance control. Defaults to False.
+            ft_data (np.array): Force-torque sensor data.
 
         Returns:
             bool: True if a bite is detected, False otherwise.
         """     
+        # Need to disable impedance control here to prevent drift
         if disable_impedance:
             if self._impedance_control_enabled:
                 self.disable_impedance_control()
@@ -688,7 +902,11 @@ class ArmController(Node):
 
             delta_ft = self._check_bite_initial_reading - ft_data
 
-            if delta_ft[2] > self._bite_threshold:
+            # print(f" FT data: {ft_data[0:3]}")
+            # print(f"Delta FT data: {delta_ft[0:3]}")
+
+            # if too easy to detect, can also make sure that delta_ft[2] > 1.0
+            if delta_ft[2] > self._bite_threshold: # and delta_ft[2] > 0.7:
                 print("Bite detected with delta:", delta_ft[0:3])
                 return True
             else:
@@ -700,83 +918,9 @@ class ArmController(Node):
             print(f"Error occurred: {e}")
             return False
 
-    def move_to_entry_point(self):
-        """Moves to the entry point.
-        """         
-        current_position = self.arm.get_position()[1]
-        print("Current EEF pose (rpy):", current_position)
-
-        entry_angle = self.entry_angle
-        spoon_offset = np.array([0, 0, self._spoon_length*1000])
-
-        final_pose_rpy = self.calculate_entry_exit_pose(current_position, entry_angle, spoon_offset)
-        print("Final EEF pose (rpy):", final_pose_rpy)
-                
-        self.arm.set_position(
-            x=final_pose_rpy[0],
-            y=final_pose_rpy[1],
-            z=final_pose_rpy[2] + self.height_offset,
-            roll=final_pose_rpy[3],
-            pitch=final_pose_rpy[4],
-            yaw=final_pose_rpy[5],
-            speed=self.transfer_speed,
-            mvacc=self._mvacc_mouth,
-            radius=0,
-            wait=False
-        )
-        time.sleep(1)
-        print("Moved to entry point")
-
-    def move_to_exit_point(self):
-        """
-        Command the robot to move to the exit point after a bite is detected.
-        """
-        if self._impedance_control:
-            if not self._impedance_control_enabled:
-                self.enable_impedance_control()
-
-        current_position = self.arm.get_position()[1]
-        print("Current EEF pose (rpy):", current_position)
-        
-        exit_angle = self.exit_angle
-        spoon_offset = np.array([0, 0, self._spoon_length*1000])
-
-        final_pose_rpy = self.calculate_entry_exit_pose(current_position, exit_angle, spoon_offset)
-        print("Final EEF pose (rpy):", final_pose_rpy)
-        
-        self.arm.set_position(
-            x=final_pose_rpy[0] - 40,
-            y=final_pose_rpy[1],
-            z=final_pose_rpy[2],
-            roll=final_pose_rpy[3],
-            pitch=final_pose_rpy[4],
-            yaw=final_pose_rpy[5],
-            speed=self.transfer_speed,
-            mvacc=self._mvacc_mouth,
-            radius=0,
-            wait=True
-        )
-
-    def move_to_start(self, wait = True):
-        """Moves to start position before commencing feeding.
-
-        Args:
-            wait (bool, optional): whether to wait for the arm to reach position. Defaults to True.
-        """
-        arm_start_pose = self._transfer_pose
-        start_t = time.time()
-        self.arm.set_position(x = arm_start_pose[0], 
-                              y = arm_start_pose[1], 
-                              z = arm_start_pose[2], 
-                              roll = arm_start_pose[3], 
-                              pitch = arm_start_pose[4], 
-                              yaw = arm_start_pose[5], 
-                              speed = self.transfer_speed, 
-                              mvacc = self._mvacc, 
-                              radius = 0, 
-                              wait = True)
-        
-        print(f"Moved to start position in {time.time() - start_t:.2f} seconds")
+    # ============================================================================
+    # UTILITY & TRANSFORM FUNCTIONS
+    # ============================================================================
 
     def get_eef_pose_from_spoon_pose(self, spoon_pose, spoon_offset):
         """
@@ -908,116 +1052,9 @@ class ArmController(Node):
         
         return final_eef_rpy
 
-    def execute_bite_transfer_cb(self, goal_handle):
-        """Execute callback for the action server (continuous mouth tracking)."""
-        
-        feedback = BiteTransfer.Feedback()
-        result = BiteTransfer.Result()
-
-        try:
-            goal = goal_handle.request
-
-            self.distance_to_mouth = goal.distance_to_mouth
-            self.exit_angle = goal.exit_angle
-            alpha = (goal.transfer_speed - 1) / 4
-            self.transfer_speed = self._min_transfer_speed * ((self._max_transfer_speed / self._min_transfer_speed) ** alpha)
-            self.transfer_speed = np.clip(self.transfer_speed, self._min_transfer_speed, self._max_transfer_speed)
-            self.height_offset = goal.height_offset
-            if goal.entry_angle != 0:
-                self.entry_angle = goal.entry_angle
-
-            self.get_logger().info(f"Start signal received. Beginning bite transfer at {self.transfer_speed:.2f} mm/s")
-            feedback.status = "Bite transfer started."
-            goal_handle.publish_feedback(feedback)
-
-            self.setup_sri_ft_sensor()
-            self.setup_arm_impedance_control(enable=True) # Check if we need this
-
-            req = SetBool.Request()
-            req.data = True
-            future = self._mouth_tracking_toggle_srv.call_async(req)
-            rclpy.spin_until_future_complete(self, future)
-            resp = future.result()
-
-            self.move_to_start()
-            self.arm.set_mode(7)
-            self.arm.set_state(0)
-            time.sleep(0.1)
-
-            ft_data = np.array(self._sri_client.get_curr_data())
-            print(ft_data)
-            if self._initial_reading is None:
-                self._initial_reading = ft_data.copy()
-                print("success")
-            self._check_bite_initial_reading = ft_data - self._initial_reading
-            self.get_logger().warn(f"Initial FT reading: {self._initial_reading[0:3]}")
-
-            self.give_feedback(message="I will feed you now", level="info")
-            self._feedback_given = False
-            self._bite_detected = False
-            
-            self.wait_for_point()
-
-            if self._impedance_control:
-                ret = self.impedance_move_to_point()
-            else:
-                ret = self.admittance_move_to_point()
-
-            if ret:
-                self.get_logger().info("Mouth servoing completed. Mouth point reached or bite detected.")
-            else:
-                self.get_logger().warn("Robot failed to reach mouth point")
-                raise Exception("Failed to reach mouth point")
-            
-            self.arm.set_mode(0)
-            self.arm.set_state(0)  
-
-            if not self._bite_detected:
-                self.give_feedback(message="You may take a bite now", level="info")
-                self.get_logger().info("Checking for bite")
-
-                self._check_bite_initial_reading = None
-                while rclpy.ok():                
-                    if self.check_for_bite(disable_impedance=True):
-                        self._check_bite_initial_reading = None                        
-                        break
-            else:
-                self.get_logger().info("Bite detected before reaching mouth point")
-            
-            self.move_to_exit_point()
-            self.get_logger().info("Successfully moved to exit point")
-            self.move_to_start()
-
-            result.success = True
-            goal_handle.succeed()
-            feedback.status = "Bite transfer completed successfully"
-            goal_handle.publish_feedback(feedback)
-            return result
-
-        except Exception as e:
-            self.get_logger().error(f"Bite transfer failed: {e}")
-            feedback.status = f"Error: {e}"
-            result.success = False
-            goal_handle.abort()
-            return result
-
-        finally:
-            try:
-                self._bite_detected = False
-                req = SetBool.Request()
-                req.data = False
-                future = self._mouth_tracking_toggle_srv.call_async(req)
-                rclpy.spin_until_future_complete(self, future)
-                resp = future.result()
-
-                if hasattr(self, 'sensor_recorder'):
-                    self.sensor_recorder.stop()
-
-                self.disconnect_sri_ft_sensor()
-                time.sleep(0.1)
-                self.get_logger().info("Completed bite transfer, cleaned up.")
-            except Exception as e:
-                self.get_logger().error(f"Error during cleanup: {e}")
+# ============================================================================
+# MAIN
+# ============================================================================
 
 def main(args=None):
     rclpy.init(args=args)    
