@@ -22,7 +22,7 @@ setup(
     entry_points={
         'console_scripts': [
             'arm_controller = arm_control_pkg.arm_controller:main',
-            'my_ros2_node_exec = arm_control_pkg.my_ros2_node:main',
+            'arm_control_old_exec = arm_control_pkg.arm_control_old:main',
             'my_service_server = arm_control_pkg.my_service_server:main',
             'my_service_client = arm_control_pkg.my_service_client:main',
         ],
