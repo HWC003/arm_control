@@ -70,6 +70,9 @@ class ArmController(Node):
         self.declare_parameter("spoon_length", 0.195)
         self._spoon_length = self.get_parameter("spoon_length").value  # Spoon length in meters
 
+        # Step counter for SetPosition
+        self.setPosCount = 0
+
         # Callback Group
         self.parallel_group = ReentrantCallbackGroup()
 
@@ -121,7 +124,7 @@ class ArmController(Node):
             self,
             MoveToPose,
             'move_to_pose',
-            self.execute_named_pose_callback,
+            self.pose_action_callback,
             callback_group=self.parallel_group
         )
         self.get_logger().info("Move to pose action server created")
@@ -216,7 +219,7 @@ class ArmController(Node):
         
         self.arm.set_state(0)
         current_state = self.arm.get_state()
-        self.get_logger().info(f"xArm current state code: {current_state}")
+        # self.get_logger().info(f"xArm current state code: {current_state}")
         
         ret = self.arm.set_position(
                 x=msg.target_point.x, y=msg.target_point.y, z=msg.target_point.z,
@@ -227,10 +230,22 @@ class ArmController(Node):
                 motion_type=motion_type
             )
 
+        # if ret != 0:
+        #     print("Failed to set position, error code:", ret)
+        # else:
+        #     self.setPosCount+=1
+        #     print("setPosCount", self.setPosCount)
+        #     print("Move to position successfully", msg.target_point.x, msg.target_point.y, msg.target_point.z, msg.roll, msg.pitch, msg.yaw)
+
         if ret != 0:
-            print("Failed to set position, error code:", ret)
+            self.get_logger().error(f"Failed to set position (error code: {ret})")
         else:
-            print("Move to position successfully")
+            self.setPosCount += 1
+            self.get_logger().info(
+                f"[setPosCount={self.setPosCount}] Move success → "
+                f"pos=({msg.target_point.x:.3f}, {msg.target_point.y:.3f}, {msg.target_point.z:.3f}), "
+                f"rpy=({msg.roll:.2f}, {msg.pitch:.2f}, {msg.yaw:.2f})"
+        )
 
     #TODO: Remove this old topic-based callback and use only the action server
     # def named_pose_topic_callback(self, msg):
@@ -273,73 +288,65 @@ class ArmController(Node):
     #     else:
     #         print("Move to pose successfully")
 
-    def execute_named_pose_callback(self, goal_handle):
+    def pose_action_callback(self, goal_handle):
         """
-        Action Server callback to move the robot to a named pose.
-        Replaces the old topic callback.
+        Action Server callback to move the robot to either a named pose
+        or set position and quartenions
         """
-        # 1. Extract the Goal
-        pose_name = goal_handle.request.pose_name
-        self.get_logger().info(f"Received Action Goal: Move to '{pose_name}'")
-
-        # 2. Safety/Pause Check (Logic from your previous code)
+        # 1. Safety/Pause Check 
         if self.is_paused:
             self.get_logger().warn("Aborting goal: Arm is currently paused")
             goal_handle.abort()
-            result = MoveToPose.Result()
-            result.success = False
-            result.message = "Arm is paused"
-            return result
-
-        # 3. Prepare Arm (Enable/Reset state)
+            return MoveToPose.Result(success=False, message="Arm is paused")
+        
+        # 2. Prepare Request Data
+        req = goal_handle.request
+        speed = req.speed if req.speed > 0 else self.default_speed
+        mvacc = req.mvacc if req.mvacc > 0 else self.default_accel
+        motion_type = req.motion_type
+        
+        # 3. Handle Movement Execution
         self.arm.set_state(0)
-        current_state = self.arm.get_state()
-        print(f"xArm current state code: {current_state}")
-        # You might want to publish feedback here if the action takes a long time
-        
-        # 4. Execute Movement
-        # We initialize ret to a generic error code just in case
-        ret = -1 
-        
-        if pose_name == "perception":
-            self.get_logger().info("Executing: Moving to Perception Pose...")
-            ret = self.arm.set_position(
-                *self._perception_pose, 
-                speed=self.default_speed, 
-                mvacc=self.default_accel, 
-                radius=0, 
-                wait=True  # BLOCKING CALL: The server waits here until arm arrives
-            )
-            
-        elif pose_name == "transfer":
-            self.get_logger().info("Executing: Moving to Bite Transfer Start Pose...")
-            ret = self.arm.set_position(
-                *self._transfer_pose, 
-                speed=self.default_speed, 
-                mvacc=self.default_accel, 
-                radius=0, 
-                wait=True
-            )
-            
-        elif pose_name == "reset":
-            self.get_logger().info("Executing: Moving to Reset Pose...")
-            ret = self.arm.set_position(
-                *self._reset_pose, 
-                speed=self.default_speed, 
-                mvacc=self.default_accel, 
-                radius=0, 
-                wait=True
-            )
-            
-        else:
-            self.get_logger().warn(f"Aborting: Invalid Pose name '{pose_name}'")
-            goal_handle.abort()
-            result = MoveToPose.Result()
-            result.success = False
-            result.message = f"Unknown pose: {pose_name}"
-            return result
 
-        # 5. Handle Success/Failure
+        # Define movement parameters based on named vs specific pose
+        if req.named_pose:
+            pose_map = {
+                "perception": self._perception_pose,
+                "transfer": self._transfer_pose,
+                "reset": self._reset_pose
+            }
+            
+            if req.pose_name not in pose_map:
+                self.get_logger().error(f"Invalid Pose name: {req.pose_name}")
+                goal_handle.abort()
+                return MoveToPose.Result(success=False, message=f"Unknown pose: {req.pose_name}")
+            
+            target = pose_map[req.pose_name]
+            self.get_logger().info(f"Moving to named pose: {req.pose_name}")
+            
+            # Execution (Non-blocking so we can check for cancellations)
+            ret = self.arm.set_position(*target, speed=speed, mvacc=mvacc, wait=True)
+        
+        else:
+            self.get_logger().info("Using pose defined by position and quarternion for action server")
+            ret = -1
+            req = goal_handle.request
+
+            self.get_logger().info(
+                "Moving to target pose: "
+                f"pos=({req.target_point.x:.3f}, {req.target_point.y:.3f}, {req.target_point.z:.3f}), "
+                f"rpy=({req.roll:.2f}, {req.pitch:.2f}, {req.yaw:.2f})"
+            )
+            ret = self.arm.set_position(
+                x=req.target_point.x, y=req.target_point.y, z=req.target_point.z,
+                roll=req.roll, pitch=req.pitch, yaw=req.yaw,
+                speed=speed, 
+                mvacc=mvacc, 
+                wait=True,
+                motion_type=motion_type
+            )
+    
+        # 4. Handle Success/Failure
         result = MoveToPose.Result()
         
         if ret == 0: # 0 usually means success in xArm API
