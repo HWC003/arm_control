@@ -323,7 +323,8 @@ class ArmController(Node):
             
             target = pose_map[req.pose_name]
             self.get_logger().info(f"Moving to named pose: {req.pose_name}")
-            
+
+            self.arm.motion_enable(enable=True)
             # Execution (Non-blocking so we can check for cancellations)
             ret = self.arm.set_position(*target, speed=speed, mvacc=mvacc, wait=True)
         
