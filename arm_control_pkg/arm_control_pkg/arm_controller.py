@@ -56,7 +56,7 @@ class ArmController(Node):
         self.default_accel = self.get_parameter('/default_accel').get_parameter_value().integer_value
 
         # Robot Poses
-        self.declare_parameter('poses.transfer_pose', [471.5, 0.0, 388.0, 0.0, -1.571, 3.141])
+        self.declare_parameter('poses.transfer_pose', [477.0, 0.1, 360.6, 0.0, -1.658, 3.141])
         self.declare_parameter('poses.perception_pose', [400.0, 200.0, 325.0, -2.222, -0.245, -1.906])
         self.declare_parameter('poses.reset_pose', [471.5, 0.0, 388.0, 0.0, -1.571, 3.141])
 
