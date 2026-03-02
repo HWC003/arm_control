@@ -1,0 +1,17 @@
+arm_control_node:
+  ros__parameters:
+    # Robot Parameters
+    robot_type: "lite6"
+    robot_ip: "192.168.1.190"
+    default_speed: 80  # mm/s
+    default_accel: 50   # mm/s^2
+
+    # Robot Poses
+    poses:
+      perception_pose: [154.3, 1.9, 304.0, 0.257, -1.552, 2.887]
+      transfer_pose: [154.3, 1.9, 304.0, 0.257, -1.552, 2.887]
+      reset_pose: [154.3, 1.9, 304.0, 0.257, -1.552, 2.887]
+      
+    # Bite Transfer Parameters
+    bite_threshold: 3.0  # N
+    spoon_length: 0.195  # m

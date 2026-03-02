@@ -43,22 +43,26 @@ class ArmController(Node):
         self.get_logger().info("Starting Arm Controller Action Server")
 
         # Robot Parameters
-        self.declare_parameter('/robot_type', 'xarm6')
-        self.declare_parameter('/robot_ip', '192.168.1.201')
+        self.declare_parameter('robot_type', 'xarm6')
+        self.declare_parameter('robot_ip', '192.168.1.201')
 
-        self.robot_type = self.get_parameter('/robot_type').get_parameter_value().string_value
-        self.robot_ip = self.get_parameter('/robot_ip').get_parameter_value().string_value
+        self.robot_type = self.get_parameter('robot_type').get_parameter_value().string_value
+        self.robot_ip = self.get_parameter('robot_ip').get_parameter_value().string_value
 
-        self.declare_parameter('/default_speed', 100)
-        self.declare_parameter('/default_accel', 50)
+        self.get_logger().info(f"Robot ip: {self.robot_ip}")
 
-        self.default_speed = self.get_parameter('/default_speed').get_parameter_value().integer_value
-        self.default_accel = self.get_parameter('/default_accel').get_parameter_value().integer_value
+        self.declare_parameter('default_speed', 100)
+        self.declare_parameter('default_accel', 50)
+
+        self.default_speed = self.get_parameter('default_speed').get_parameter_value().integer_value
+        self.default_accel = self.get_parameter('default_accel').get_parameter_value().integer_value
 
         # Robot Poses
         self.declare_parameter('poses.transfer_pose', [477.0, 0.1, 360.6, 0.0, -1.658, 3.141])
         self.declare_parameter('poses.perception_pose', [400.0, 200.0, 325.0, -2.222, -0.245, -1.906])
         self.declare_parameter('poses.reset_pose', [471.5, 0.0, 388.0, 0.0, -1.571, 3.141])
+
+        self.get_logger().info(f"reset pose: {self.get_parameter('poses.reset_pose').get_parameter_value().double_array_value}")
 
         self._transfer_pose = self.get_parameter('poses.transfer_pose').get_parameter_value().double_array_value
         self._perception_pose = self.get_parameter('poses.perception_pose').get_parameter_value().double_array_value
