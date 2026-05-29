@@ -8,10 +8,10 @@ arm_control_node:
 
     # Robot Poses
     poses:
-      perception_pose: [154.3, 1.9, 304.0, 0.257, -1.552, 2.887]
-      transfer_pose: [154.3, 1.9, 304.0, 0.257, -1.552, 2.887]
-      reset_pose: [154.3, 1.9, 304.0, 0.257, -1.552, 2.887]
+      perception_pose: [79.2, 128.1, 471.7, 2.691, -0.1693, 2.646]
+      transfer_pose: [-69.4, 238.3, 225.6, 2.187, -0.723, 2.950]
+      reset_pose: [-39.8, 182.9, 222.9, 1.899, -0.808, 3.098]
       
     # Bite Transfer Parameters
     bite_threshold: 3.0  # N
-    spoon_length: 0.195  # m
+    spoon_length: 0.270  # m
