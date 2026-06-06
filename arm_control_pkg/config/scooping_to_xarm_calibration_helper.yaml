@@ -1,0 +1,29 @@
+scooping_to_xarm_calibration_helper:
+  ros__parameters:
+    move_action_name: "move_to_pose"
+    perception_pose_name: "perception"
+    move_lite6_before_sample: false
+    motion_type: 0
+    action_timeout_sec: 120.0
+
+    apriltag_target_id: 0
+    tag_frame_templates: ["tag36h11:{id}"]
+    tf_timeout_sec: 0.6
+    max_tag_age_sec: 0.8
+    strict_tag_age_check: true
+    request_retries: 2
+
+    xarm_base_frame: "xarm2_base"
+
+    xarm_robot_ip: "192.168.1.201"
+    xarm_gripper_open_pos: 850.0
+    xarm_gripper_close_pos: 120.0
+    xarm_gripper_speed: 2000.0
+
+    run_once_service: "arm2/helper/run_once"
+    open_gripper_service: "arm2/helper/open_gripper"
+    confirm_manual_pose_service: "arm2/helper/confirm_manual_pose"
+    solve_offset_service: "arm2/helper/solve_offset"
+    reset_service: "arm2/helper/reset"
+
+    min_samples: 4
