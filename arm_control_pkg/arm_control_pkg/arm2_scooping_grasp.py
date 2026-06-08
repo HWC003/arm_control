@@ -475,6 +475,19 @@ class Arm2ScoopingGrasp(Node):
             apriltag_frame = None
             apriltag_error = None
 
+            ret = self._set_gripper_position(self.gripper_open_pos)
+            if ret != 0:
+                return False, f'Failed to open gripper (code={ret}).'
+
+            # Fixed approach pose away from target to reduce risk of collision during approach
+            # x = 400.5mm, y = 18.2mm, z = -68.5mm, roll = -179.6 deg, pitch = -45.3 deg, yaw = -90.2 deg
+            # ret = self._move_to_mm(x_mm, y_mm, z_approach_mm, roll, pitch, yaw)
+            approach_6dof  = [400.5, 18.2, -68.5, math.radians(-179.6), math.radians(-45.3), math.radians(-90.2)]
+            ret = self._move_to_mm(approach_6dof[0], approach_6dof[1], approach_6dof[2], approach_6dof[3], approach_6dof[4], approach_6dof[5])
+            if ret != 0:
+                return False, f'Failed to move to approach pose (code={ret}).'
+
+
             if self.use_apriltag_target:
                 for attempt in range(1, self.apriltag_request_retries + 2):
                     apriltag_pose, apriltag_frame, apriltag_error = self._call_get_apriltag_target(
@@ -549,14 +562,6 @@ class Arm2ScoopingGrasp(Node):
                     f'Target outside workspace limits: x={x_mm:.1f}, y={y_mm:.1f}, z={z_grasp_mm:.1f} mm'
                 )
 
-            ret = self._set_gripper_position(self.gripper_open_pos)
-            if ret != 0:
-                return False, f'Failed to open gripper (code={ret}).'
-
-            ret = self._move_to_mm(x_mm, y_mm, z_approach_mm, roll, pitch, yaw)
-            if ret != 0:
-                return False, f'Failed to move to approach pose (code={ret}).'
-
             ret = self._move_to_mm(x_mm, y_mm, z_grasp_mm, roll, pitch, yaw)
             if ret != 0:
                 return False, f'Failed to move to grasp pose (code={ret}).'
@@ -565,6 +570,7 @@ class Arm2ScoopingGrasp(Node):
             if ret != 0:
                 return False, f'Failed to close gripper (code={ret}).'
 
+            # TODO: if tilt bowl mode, put code to raise bowl and tilt here
             # ret = self._move_to_mm(x_mm, y_mm, z_lift_mm, roll, pitch, yaw)
             # if ret != 0:
             #     response.success = False
