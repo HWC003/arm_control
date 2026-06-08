@@ -1,0 +1,13 @@
+arm2_extrinsic_calibration_helper:
+  ros__parameters:
+    robot_ip: "192.168.1.201"
+    camera_frame: "orbbec_camera_color_optical_frame"
+    camera_point_topic: "/clicked_point"
+    arm2_base_frame: "xarm2_base"
+
+    capture_service_name: "arm2/calibration/capture_pair"
+    solve_service_name: "arm2/calibration/solve"
+    reset_service_name: "arm2/calibration/reset"
+
+    min_pairs: 4
+    eef_offset_xyz_mm: [0.0, 0.0, 0.0]
