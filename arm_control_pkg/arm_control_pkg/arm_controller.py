@@ -219,7 +219,7 @@ class ArmController(Node):
 
         if self.is_paused:
             self.get_logger().warn("Ignoring new pose command because arm is currently paused")
-            self.arm.set_state(3) # TODO fix the proper pause behavior
+            return
         
         self.arm.set_state(0)
         current_state = self.arm.get_state()
@@ -374,12 +374,13 @@ class ArmController(Node):
         paused = msg.data
         if paused is True and not self.is_paused:
             self.get_logger().warn("PAUSE COMMAND RECEIVED: Stopping the arm immediately.")
-            self.arm.set_state(3)
+            self.arm.set_state(4)
             self.is_paused=True
 
         elif paused is False and self.is_paused:
             self.get_logger().info("RESUME COMMAND RECEIVED: Enabling Motion.")
             self.arm.set_state(0)
+            self.is_paused = False
 
         elif paused is True and self.is_paused:
             self.get_logger().info("ALREADY PAUSED: Doing Nothing")

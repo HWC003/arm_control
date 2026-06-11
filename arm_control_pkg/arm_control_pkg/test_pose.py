@@ -12,8 +12,9 @@ robot_ip = '192.168.1.190'
 # Poses are defined in a structured way (e.g., using a dictionary) for clarity
 robot_poses = {
     "reset": [-39.8, 182.9, 222.9, 1.899, -0.808, 3.098],
+    # "reset": [-10.0, 230.0, 220.0, 1.571, -0.785, 3.142],
 
-    "bite_transfer_start": [-39.8, 182.9, 222.9, 1.899, -0.808, 3.098],
+    "bite_transfer_start": [-10.0, 230.0, 220.0, 1.571, -0.785, 3.142],
 
     # "perception":[79.2, 128.1, 471.7, 2.691, -0.1693, 2.646],
     "perception":[77.3, 272.3, 209.3, 2.347, -0.719, 2.985],
