@@ -14,7 +14,7 @@ arm2_scooping_grasp:
     use_apriltag_target: true
     fallback_to_bowl_centroid: false
     apriltag_target_id: 0
-    bowl_idx_to_tag_id: [-1, 1, 0]
+    bowl_idx_to_tag_id: [-1, 0, 1]
     tag_frame_templates: ["tag36h11:{id}"]
     # tag_to_gripper_xyz: [0.077028, -0.170170, -0.857843]
     # tag_to_gripper_rpy: [1.512064, 0.078675, 0.083398]

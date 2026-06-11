@@ -11,13 +11,16 @@ from xarm.wrapper import XArmAPI
 robot_ip = '192.168.1.190'
 # Poses are defined in a structured way (e.g., using a dictionary) for clarity
 robot_poses = {
-    "reset": [-39.8, 182.9, 222.9, 1.899, -0.808, 3.098],
-    # "reset": [-10.0, 230.0, 220.0, 1.571, -0.785, 3.142],
+    # "reset": [-39.8, 182.9, 222.9, 1.899, -0.808, 3.098],
+    "reset": [-10.0, 230.0, 220.0, 1.571, -0.785, 3.142],
 
     "bite_transfer_start": [-10.0, 230.0, 220.0, 1.571, -0.785, 3.142],
+    # "tilt_bowl_scooping_traj_1_2_start": [83.6, 321.2, 361.3, 2.576, 0.161, -2.333],
+    # "tilt_bowl_scooping_traj_3_start": [100.2, 361.0, 356.5, 2.595, 0.0907, -2.131],
 
-    # "perception":[79.2, 128.1, 471.7, 2.691, -0.1693, 2.646],
-    "perception":[77.3, 272.3, 209.3, 2.347, -0.719, 2.985],
+
+    "perception":[79.2, 128.1, 471.7, 2.691, -0.1693, 2.646],
+    # "validate_acquisition":[77.3, 272.3, 209.3, 2.347, -0.719, 2.985],
 }
 
 def setup_arm(robot_ip, reset=False):
