@@ -63,9 +63,9 @@ def generate_launch_description():
                 '--yaw',
                 ry,
                 '--frame-id',
-                camera_source_frame,
-                '--child-frame-id',
                 arm2_base_frame,
+                '--child-frame-id',
+                camera_source_frame,
             ],
         ),
     ])

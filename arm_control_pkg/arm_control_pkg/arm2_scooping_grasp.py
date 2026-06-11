@@ -16,7 +16,7 @@ from tf2_geometry_msgs import do_transform_point
 from tf2_ros import (Buffer, ConnectivityException, ExtrapolationException,
                      LookupException, TransformListener)
 
-from feeding_msgs.srv import GetAprilTagTarget, GetScoopingPoint
+from feeding_msgs.srv import GetScoopingPoint
 from xarm.wrapper import XArmAPI
 
 
@@ -36,6 +36,63 @@ def quat_to_rpy(x: float, y: float, z: float, w: float):
     yaw = math.atan2(siny_cosp, cosy_cosp)
 
     return roll, pitch, yaw
+
+
+def rpy_to_quat(roll: float, pitch: float, yaw: float):
+    cr = math.cos(roll * 0.5)
+    sr = math.sin(roll * 0.5)
+    cp = math.cos(pitch * 0.5)
+    sp = math.sin(pitch * 0.5)
+    cy = math.cos(yaw * 0.5)
+    sy = math.sin(yaw * 0.5)
+
+    qw = cr * cp * cy + sr * sp * sy
+    qx = sr * cp * cy - cr * sp * sy
+    qy = cr * sp * cy + sr * cp * sy
+    qz = cr * cp * sy - sr * sp * cy
+    return qx, qy, qz, qw
+
+
+def quat_multiply(a, b):
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+
+    x = aw * bx + ax * bw + ay * bz - az * by
+    y = aw * by - ax * bz + ay * bw + az * bx
+    z = aw * bz + ax * by - ay * bx + az * bw
+    w = aw * bw - ax * bx - ay * by - az * bz
+    return x, y, z, w
+
+
+def quat_normalize(q):
+    x, y, z, w = q
+    n = math.sqrt(x * x + y * y + z * z + w * w)
+    if n == 0.0:
+        return 0.0, 0.0, 0.0, 1.0
+    return x / n, y / n, z / n, w / n
+
+
+def rotate_vector_by_quat(q, vec):
+    x, y, z, w = quat_normalize(q)
+    vx, vy, vz = vec
+
+    r00 = 1.0 - 2.0 * (y * y + z * z)
+    r01 = 2.0 * (x * y - z * w)
+    r02 = 2.0 * (x * z + y * w)
+
+    r10 = 2.0 * (x * y + z * w)
+    r11 = 1.0 - 2.0 * (x * x + z * z)
+    r12 = 2.0 * (y * z - x * w)
+
+    r20 = 2.0 * (x * z - y * w)
+    r21 = 2.0 * (y * z + x * w)
+    r22 = 1.0 - 2.0 * (x * x + y * y)
+
+    return (
+        r00 * vx + r01 * vy + r02 * vz,
+        r10 * vx + r11 * vy + r12 * vz,
+        r20 * vx + r21 * vy + r22 * vz,
+    )
 
 
 class Arm2ScoopingGrasp(Node):
@@ -64,9 +121,11 @@ class Arm2ScoopingGrasp(Node):
         self.declare_parameter('request_retries', 2)
         self.declare_parameter('use_apriltag_target', True)
         self.declare_parameter('fallback_to_bowl_centroid', False)
-        self.declare_parameter('apriltag_target_service', 'food_perception/get_apriltag_target')
         self.declare_parameter('apriltag_target_id', 0)
         self.declare_parameter('bowl_idx_to_tag_id', [-1, 1, 0])
+        self.declare_parameter('tag_frame_templates', ['tag36h11:{id}', 'tag{id}', 'tag_{id}'])
+        self.declare_parameter('tag_to_gripper_xyz', [0.0, 0.0, 0.0])
+        self.declare_parameter('tag_to_gripper_rpy', [0.0, 0.0, 0.0])
         self.declare_parameter('apriltag_request_retries', 1)
         self.declare_parameter('apriltag_pose_max_age_sec', 0.5)
         self.declare_parameter('use_apriltag_orientation', True)
@@ -103,9 +162,11 @@ class Arm2ScoopingGrasp(Node):
         self.request_retries = int(self.get_parameter('request_retries').value)
         self.use_apriltag_target = bool(self.get_parameter('use_apriltag_target').value)
         self.fallback_to_bowl_centroid = bool(self.get_parameter('fallback_to_bowl_centroid').value)
-        self.apriltag_target_service = self.get_parameter('apriltag_target_service').value
         self.apriltag_target_id = int(self.get_parameter('apriltag_target_id').value)
         self.bowl_idx_to_tag_id = list(self.get_parameter('bowl_idx_to_tag_id').value)
+        self.tag_frame_templates = [str(v) for v in self.get_parameter('tag_frame_templates').value]
+        self.tag_to_gripper_xyz = [float(v) for v in self.get_parameter('tag_to_gripper_xyz').value]
+        self.tag_to_gripper_rpy = [float(v) for v in self.get_parameter('tag_to_gripper_rpy').value]
         self.apriltag_request_retries = int(self.get_parameter('apriltag_request_retries').value)
         self.apriltag_pose_max_age_sec = float(self.get_parameter('apriltag_pose_max_age_sec').value)
         self.use_apriltag_orientation = bool(self.get_parameter('use_apriltag_orientation').value)
@@ -138,6 +199,12 @@ class Arm2ScoopingGrasp(Node):
             raise ValueError('workspace_min_xyz/workspace_max_xyz must each have exactly 3 values.')
         if len(self.bowl_idx_to_tag_id) == 0:
             raise ValueError('bowl_idx_to_tag_id must contain at least one entry.')
+        if len(self.tag_frame_templates) == 0:
+            raise ValueError('tag_frame_templates must contain at least one template.')
+        if len(self.tag_to_gripper_xyz) != 3:
+            raise ValueError('tag_to_gripper_xyz must have exactly 3 values.')
+        if len(self.tag_to_gripper_rpy) != 3:
+            raise ValueError('tag_to_gripper_rpy must have exactly 3 values.')
         try:
             self.bowl_idx_to_tag_id = [int(v) for v in self.bowl_idx_to_tag_id]
         except Exception as exc:
@@ -154,11 +221,6 @@ class Arm2ScoopingGrasp(Node):
         self._scooping_client = self.create_client(
             GetScoopingPoint,
             self.scooping_service_name,
-            callback_group=self._callback_group,
-        )
-        self._apriltag_client = self.create_client(
-            GetAprilTagTarget,
-            self.apriltag_target_service,
             callback_group=self._callback_group,
         )
 
@@ -181,6 +243,87 @@ class Arm2ScoopingGrasp(Node):
         self.get_logger().info(
             f"Started arm2 grasp node (robot_ip={self.robot_ip}, trigger={self.trigger_service_name}, "
             f"target_frame={self.target_frame}, bowl_idx_to_tag_id={self.bowl_idx_to_tag_id})"
+        )
+
+    @staticmethod
+    def _time_to_sec(stamp) -> float:
+        return float(stamp.sec) + float(stamp.nanosec) * 1e-9
+
+    def _resolve_tag_frames(self, tag_id: int):
+        candidates = []
+        for template in self.tag_frame_templates:
+            try:
+                frame = str(template).format(id=tag_id)
+            except Exception:
+                continue
+            frame = frame.strip()
+            if frame and frame not in candidates:
+                candidates.append(frame)
+        return candidates
+
+    def _lookup_apriltag_target_tf(self, target_tag_id: int):
+        candidates = self._resolve_tag_frames(target_tag_id)
+        if not candidates:
+            return None, None, None, 'No valid tag frame candidates from tag_frame_templates.'
+
+        last_error = None
+        for tag_frame in candidates:
+            try:
+                tf_msg = self.tf_buffer.lookup_transform(
+                    self.target_frame,
+                    tag_frame,
+                    Time(),
+                    timeout=Duration(seconds=self.tf_timeout_sec),
+                )
+
+                now_sec = self.get_clock().now().nanoseconds * 1e-9
+                stamp_sec = self._time_to_sec(tf_msg.header.stamp)
+                age_sec = max(0.0, now_sec - stamp_sec) if stamp_sec > 0.0 else (self.apriltag_pose_max_age_sec + 1.0)
+
+                if self.apriltag_pose_max_age_sec > 0.0 and age_sec > self.apriltag_pose_max_age_sec:
+                    return None, None, None, (
+                        f'AprilTag TF pose stale for {tag_frame}: age={age_sec:.3f}s '
+                        f'(limit={self.apriltag_pose_max_age_sec:.3f}s).'
+                    )
+
+                tr = tf_msg.transform.translation
+                rot = tf_msg.transform.rotation
+
+                tag_q = (
+                    float(rot.x),
+                    float(rot.y),
+                    float(rot.z),
+                    float(rot.w),
+                )
+                off_q = rpy_to_quat(
+                    float(self.tag_to_gripper_rpy[0]),
+                    float(self.tag_to_gripper_rpy[1]),
+                    float(self.tag_to_gripper_rpy[2]),
+                )
+
+                off_xyz_rot = rotate_vector_by_quat(
+                    tag_q,
+                    (
+                        float(self.tag_to_gripper_xyz[0]),
+                        float(self.tag_to_gripper_xyz[1]),
+                        float(self.tag_to_gripper_xyz[2]),
+                    ),
+                )
+
+                target_xyz = (
+                    float(tr.x) + off_xyz_rot[0],
+                    float(tr.y) + off_xyz_rot[1],
+                    float(tr.z) + off_xyz_rot[2],
+                )
+                target_q = quat_normalize(quat_multiply(tag_q, off_q))
+
+                return target_xyz, target_q, tag_frame, None
+            except (LookupException, ConnectivityException, ExtrapolationException) as exc:
+                last_error = exc
+
+        return None, None, None, (
+            f'No transform available from tag candidates {candidates} to {self.target_frame}. '
+            f'Last error: {last_error}'
         )
 
     def _on_set_parameters(self, params):
@@ -348,42 +491,6 @@ class Arm2ScoopingGrasp(Node):
 
         return idx, tag_id, None
 
-    def _call_get_apriltag_target(self, target_tag_id):
-        if not self._apriltag_client.wait_for_service(timeout_sec=1.0):
-            return None, None, 'GetAprilTagTarget service is unavailable.'
-
-        req = GetAprilTagTarget.Request()
-        req.target_tag_id = int(target_tag_id)
-        req.target_frame = self.target_frame
-        future = self._apriltag_client.call_async(req)
-
-        deadline = time.time() + self.service_timeout_sec
-        while rclpy.ok() and not future.done() and time.time() < deadline:
-            time.sleep(0.02)
-
-        if not future.done():
-            return None, None, f'GetAprilTagTarget call timed out after {self.service_timeout_sec:.1f}s.'
-
-        if future.exception() is not None:
-            return None, None, f'GetAprilTagTarget call failed: {future.exception()}'
-
-        resp = future.result()
-        if resp is None:
-            return None, None, 'GetAprilTagTarget returned no response.'
-        if not resp.success:
-            return None, None, f'GetAprilTagTarget returned success=false: {resp.message}'
-
-        if self.apriltag_pose_max_age_sec > 0.0 and float(resp.age_sec) > self.apriltag_pose_max_age_sec:
-            return None, None, (
-                f'AprilTag pose stale: age={resp.age_sec:.3f}s '
-                f'(limit={self.apriltag_pose_max_age_sec:.3f}s).'
-            )
-
-        if not resp.target_pose.header.frame_id:
-            return None, None, 'GetAprilTagTarget returned target_pose with empty frame_id.'
-
-        return resp.target_pose, resp.tag_frame, None
-
     def _get_orientation(self):
         if self.use_current_orientation:
             try:
@@ -472,6 +579,7 @@ class Arm2ScoopingGrasp(Node):
             yaw = None
 
             apriltag_pose = None
+            apriltag_quat = None
             apriltag_frame = None
             apriltag_error = None
 
@@ -482,7 +590,7 @@ class Arm2ScoopingGrasp(Node):
             # Fixed approach pose away from target to reduce risk of collision during approach
             # x = 400.5mm, y = 18.2mm, z = -68.5mm, roll = -179.6 deg, pitch = -45.3 deg, yaw = -90.2 deg
             # ret = self._move_to_mm(x_mm, y_mm, z_approach_mm, roll, pitch, yaw)
-            approach_6dof  = [400.5, 18.2, -68.5, math.radians(-179.6), math.radians(-45.3), math.radians(-90.2)]
+            approach_6dof  = [468.1, 4.7, -47.2, math.radians(-166.9), math.radians(-43.9), math.radians(-90.1)]
             ret = self._move_to_mm(approach_6dof[0], approach_6dof[1], approach_6dof[2], approach_6dof[3], approach_6dof[4], approach_6dof[5])
             if ret != 0:
                 return False, f'Failed to move to approach pose (code={ret}).'
@@ -490,33 +598,33 @@ class Arm2ScoopingGrasp(Node):
 
             if self.use_apriltag_target:
                 for attempt in range(1, self.apriltag_request_retries + 2):
-                    apriltag_pose, apriltag_frame, apriltag_error = self._call_get_apriltag_target(
+                    apriltag_pose, apriltag_quat, apriltag_frame, apriltag_error = self._lookup_apriltag_target_tf(
                         resolved_tag_id
                     )
                     if apriltag_pose is not None:
                         break
                     self.get_logger().warn(
-                        f'GetAprilTagTarget attempt {attempt}/{self.apriltag_request_retries + 1} '
+                        f'AprilTag TF attempt {attempt}/{self.apriltag_request_retries + 1} '
                         f'failed for tag_id={resolved_tag_id}: {apriltag_error}'
                     )
 
                 if apriltag_pose is not None:
-                    source_name = f'apriltag:{apriltag_frame}'
-                    x_m = apriltag_pose.pose.position.x + float(self.point_offset_xyz[0])
-                    y_m = apriltag_pose.pose.position.y + float(self.point_offset_xyz[1])
+                    source_name = f'apriltag_tf:{apriltag_frame}'
+                    x_m = apriltag_pose[0] + float(self.point_offset_xyz[0])
+                    y_m = apriltag_pose[1] + float(self.point_offset_xyz[1])
                     z_m = (
-                        apriltag_pose.pose.position.z
+                        apriltag_pose[2]
                         + float(self.point_offset_xyz[2])
                         + self.grasp_z_offset
                     )
 
                     if self.use_apriltag_orientation:
-                        q = apriltag_pose.pose.orientation
+                        q = apriltag_quat
                         roll, pitch, yaw = quat_to_rpy(
-                            float(q.x),
-                            float(q.y),
-                            float(q.z),
-                            float(q.w),
+                            float(q[0]),
+                            float(q[1]),
+                            float(q[2]),
+                            float(q[3]),
                         )
                     else:
                         roll, pitch, yaw = self._get_orientation()
@@ -561,6 +669,12 @@ class Arm2ScoopingGrasp(Node):
                 return False, (
                     f'Target outside workspace limits: x={x_mm:.1f}, y={y_mm:.1f}, z={z_grasp_mm:.1f} mm'
                 )
+
+            self.get_logger().info(
+                f'Executing grasp using {source_name} at {self.target_frame}: '
+                f'x={x_mm:.1f}mm, y={y_mm:.1f}mm, z={z_grasp_mm:.1f}mm, '
+                f'roll={math.degrees(roll):.1f}deg, pitch={math.degrees(pitch):.1f}deg, yaw={math.degrees(yaw):.1f}deg'
+            )
 
             ret = self._move_to_mm(x_mm, y_mm, z_grasp_mm, roll, pitch, yaw)
             if ret != 0:
