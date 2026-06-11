@@ -1,0 +1,19 @@
+arm2_tag_grasp_calibration_helper:
+  ros__parameters:
+    robot_ip: "192.168.1.201"
+    camera_frame: "orbbec_camera_color_optical_frame"
+    apriltag_target_id: 0
+    tag_frame_templates: ["tag36h11:{id}"]
+    tf_timeout_sec: 0.6
+    max_tag_age_sec: 0.8
+    strict_tag_age_check: true
+
+    capture_service_name: "arm2/tag_grasp_calibration/capture_pair"
+    solve_service_name: "arm2/tag_grasp_calibration/solve"
+    reset_service_name: "arm2/tag_grasp_calibration/reset"
+    dump_pairs_service_name: "arm2/tag_grasp_calibration/dump_pairs"
+    min_samples: 4
+
+    close_gripper_on_capture: true
+    xarm_gripper_close_pos: 120.0
+    xarm_gripper_speed: 2000.0
