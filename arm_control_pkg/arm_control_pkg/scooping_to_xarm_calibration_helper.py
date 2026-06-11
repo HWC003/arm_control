@@ -579,7 +579,7 @@ class ScoopingToXarmCalibrationHelper(Node):
             }
 
             yaml_snippet = (
-                "apriltag_target_provider:\n"
+                "arm2_scooping_grasp:\n"
                 "  ros__parameters:\n"
                 f"    tag_to_gripper_xyz: [{t_t_g[0]:.6f}, {t_t_g[1]:.6f}, {t_t_g[2]:.6f}]\n"
                 f"    tag_to_gripper_rpy: [{roll_t_g:.6f}, {pitch_t_g:.6f}, {yaw_t_g:.6f}]"
@@ -587,7 +587,7 @@ class ScoopingToXarmCalibrationHelper(Node):
 
             self.get_logger().info("Solved AprilTag->gripper calibration:")
             self.get_logger().info(json.dumps(output, indent=2))
-            self.get_logger().info("Use the following parameters in apriltag_orbbec.yaml:")
+            self.get_logger().info("Use the following parameters in arm2_scooping_grasp.yaml:")
             self.get_logger().info(yaml_snippet)
 
             response.success = True
