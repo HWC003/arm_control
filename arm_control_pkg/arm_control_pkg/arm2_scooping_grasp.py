@@ -113,6 +113,7 @@ class Arm2ScoopingGrasp(Node):
         self.declare_parameter('robot_ip', '192.168.1.201')
         self.declare_parameter('get_scooping_point_service', 'food_perception/get_scooping_point')
         self.declare_parameter('trigger_service_name', 'arm2/execute_grasp')
+        self.declare_parameter('return_to_init_service_name', 'arm2/return_to_saved_initial_pose')
         self.declare_parameter('selected_bowl_idx', -1)
         self.declare_parameter('auto_execute_on_index_set', True)
         self.declare_parameter('target_frame', 'xarm2_base')
@@ -156,6 +157,7 @@ class Arm2ScoopingGrasp(Node):
         self.robot_ip = self.get_parameter('robot_ip').value
         self.scooping_service_name = self.get_parameter('get_scooping_point_service').value
         self.trigger_service_name = self.get_parameter('trigger_service_name').value
+        self.return_to_init_service_name = self.get_parameter('return_to_init_service_name').value
         self.target_frame = self.get_parameter('target_frame').value
         self.tf_timeout_sec = float(self.get_parameter('tf_timeout_sec').value)
         self.service_timeout_sec = float(self.get_parameter('service_timeout_sec').value)
@@ -214,6 +216,7 @@ class Arm2ScoopingGrasp(Node):
         self._callback_group = ReentrantCallbackGroup()
         self._pending_auto_execute = False
         self._pending_auto_idx = None
+        self._saved_init_pose_by_tag = {}
 
         self.tf_buffer = Buffer(cache_time=Duration(seconds=30.0))
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -230,6 +233,12 @@ class Arm2ScoopingGrasp(Node):
             self.execute_grasp_callback,
             callback_group=self._callback_group,
         )
+        self._return_to_init_srv = self.create_service(
+            Trigger,
+            self.return_to_init_service_name,
+            self.move_to_saved_initial_pose_callback,
+            callback_group=self._callback_group,
+        )
         self.add_on_set_parameters_callback(self._on_set_parameters)
         self._auto_exec_timer = self.create_timer(
             0.1,
@@ -242,6 +251,7 @@ class Arm2ScoopingGrasp(Node):
 
         self.get_logger().info(
             f"Started arm2 grasp node (robot_ip={self.robot_ip}, trigger={self.trigger_service_name}, "
+            f"return_to_init={self.return_to_init_service_name}, "
             f"target_frame={self.target_frame}, bowl_idx_to_tag_id={self.bowl_idx_to_tag_id})"
         )
 
@@ -527,6 +537,47 @@ class Arm2ScoopingGrasp(Node):
         )
         return ret
 
+    def _vibrate_arm(self):
+        amplitude = 3.0  # mm
+        frequency = 10.0  # Hz (cycles per second)
+        duration = 3.0   # seconds to vibrate
+
+        # Get the current starting position
+        code, current_pos = self.arm.get_position()
+
+        # Switch to Servo Control Mode (Mode 1) for real-time streaming
+        self.arm.set_mode(1)
+        self.arm.set_state(0)
+        time.sleep(0.1) # Brief pause to let the mode switch register
+
+        start_time = time.time()
+
+        try:
+            while time.time() - start_time < duration:
+                t = time.time() - start_time
+                
+                # Calculate the Z-axis offset using a sine wave
+                # Sine wave formula: offset = Amplitude * sin(2 * pi * Frequency * time)
+                z_offset = amplitude * math.sin(2 * math.pi * frequency * t)
+                
+                # Create the new target pose based on the starting position
+                target_pos = current_pos.copy()
+                target_pos[2] += z_offset # Applying the vibration to the Z axis
+                
+                # Stream the target position. 
+                # is_radian=False depending on your setup, wait=False is crucial for smooth streaming
+                self.arm.set_servo_cartesian(target_pos, wait=False)
+                
+                # Sleep briefly to match the arm's expected real-time communication frequency (~100Hz)
+                time.sleep(0.01) 
+
+        finally:
+            # Always reset the arm back to normal position mode (Mode 0) when done
+            self.arm.set_mode(0)
+            self.arm.set_state(0)
+
+        return 0  # Return success code    
+    
     def _set_gripper_position(self, pos):
         ret = self.arm.set_gripper_position(
             float(pos),
@@ -548,6 +599,58 @@ class Arm2ScoopingGrasp(Node):
             and min_y <= y_mm <= max_y
             and min_z <= z_mm <= max_z
         )
+
+    def _move_to_saved_initial_pose(self):
+        selected_idx, resolved_tag_id, map_error = self._resolve_selected_bowl_tag()
+        if map_error is not None:
+            return False, map_error
+
+        if resolved_tag_id < 0:
+            return False, (
+                f'Cannot return to saved pose for selected_bowl_idx={selected_idx}: '
+                f'mapped tag_id={resolved_tag_id} (no-tag bowl).'
+            )
+
+        saved_pose = self._saved_init_pose_by_tag.get(resolved_tag_id)
+        if saved_pose is None:
+            return False, (
+                f'No saved initial pose for tag_id={resolved_tag_id}. '
+                'Run a successful grasp for this tag first.'
+            )
+
+        x_mm, y_mm, z_mm, roll, pitch, yaw = saved_pose
+        if not self._within_workspace(x_mm, y_mm, z_mm):
+            return False, (
+                f'Saved pose for tag_id={resolved_tag_id} is outside workspace limits: '
+                f'x={x_mm:.1f}, y={y_mm:.1f}, z={z_mm:.1f} mm'
+            )
+
+        ret = self._set_gripper_position(self.gripper_close_pos)
+        if ret != 0:
+            return False, f'Failed to keep gripper closed before return move (code={ret}).'
+
+        # Add a few intermediate waypoints for a smoother return trajectory if obstacles are in the way (based on observed behavior during testing)
+        ret = self._move_to_mm(x_mm, y_mm + 100.0*math.sin(math.radians(-45)), z_mm + 100.0*math.cos(math.radians(-45)), roll, pitch, yaw)
+        if ret != 0:
+            return False, f'Failed to move to raised pose (code={ret}).'
+
+        ret = self._vibrate_arm()
+        if ret != 0:
+            return False, f'Failed to vibrate arm to level food (code={ret}).'
+
+        ret = self._move_to_mm(x_mm, y_mm, z_mm, roll, pitch, yaw)
+        if ret != 0:
+            return False, (
+                f'Failed to move to saved initial pose for tag_id={resolved_tag_id} '
+                f'(code={ret}).'
+            )
+
+        message = (
+            f'Moved to saved initial pose for tag_id={resolved_tag_id} at {self.target_frame}: '
+            f'x={x_mm:.1f}mm, y={y_mm:.1f}mm, z={z_mm:.1f}mm (gripper closed).'
+        )
+        self.get_logger().info(message)
+        return True, message
 
     def _execute_grasp(self):
         if not self._grasp_lock.acquire(blocking=False):
@@ -583,17 +686,6 @@ class Arm2ScoopingGrasp(Node):
             apriltag_frame = None
             apriltag_error = None
 
-            ret = self._set_gripper_position(self.gripper_open_pos)
-            if ret != 0:
-                return False, f'Failed to open gripper (code={ret}).'
-
-            # Fixed approach pose away from target to reduce risk of collision during approach
-            # x = 400.5mm, y = 18.2mm, z = -68.5mm, roll = -179.6 deg, pitch = -45.3 deg, yaw = -90.2 deg
-            # ret = self._move_to_mm(x_mm, y_mm, z_approach_mm, roll, pitch, yaw)
-            approach_6dof  = [468.1, 4.7, -47.2, math.radians(-166.9), math.radians(-43.9), math.radians(-90.1)]
-            ret = self._move_to_mm(approach_6dof[0], approach_6dof[1], approach_6dof[2], approach_6dof[3], approach_6dof[4], approach_6dof[5])
-            if ret != 0:
-                return False, f'Failed to move to approach pose (code={ret}).'
 
 
             if self.use_apriltag_target:
@@ -659,6 +751,34 @@ class Arm2ScoopingGrasp(Node):
                 z_m = transformed_point.point.z + float(self.point_offset_xyz[2]) + self.grasp_z_offset
                 roll, pitch, yaw = self._get_orientation()
 
+            init_pose_6dof = [
+                x_m * 1000.0,
+                y_m * 1000.0,
+                z_m * 1000.0,
+                roll,
+                pitch,
+                yaw,
+            ]
+            self._saved_init_pose_by_tag[resolved_tag_id] = init_pose_6dof
+            self.get_logger().info(
+                f'Saved initial pose for tag_id={resolved_tag_id}: '
+                f'x={init_pose_6dof[0]:.1f}mm, y={init_pose_6dof[1]:.1f}mm, z={init_pose_6dof[2]:.1f}mm'
+            )
+
+            ret = self._set_gripper_position(self.gripper_open_pos)
+            if ret != 0:
+                return False, f'Failed to open gripper (code={ret}).'
+
+            # Fixed approach pose away from target to reduce risk of collision during approach
+            # x = 400.5mm, y = 18.2mm, z = -68.5mm, roll = -179.6 deg, pitch = -45.3 deg, yaw = -90.2 deg
+            # ret = self._move_to_mm(x_mm, y_mm, z_approach_mm, roll, pitch, yaw)
+            approach_6dof  = [470.8, -12.9, -120.8, math.radians(-176.7), math.radians(-42.3), math.radians(-90.6)]
+            ret = self._move_to_mm(approach_6dof[0], approach_6dof[1], approach_6dof[2], approach_6dof[3], approach_6dof[4], approach_6dof[5])
+            if ret != 0:
+                return False, f'Failed to move to approach pose (code={ret}).'
+
+
+
             x_mm = x_m * 1000.0
             y_mm = y_m * 1000.0
             z_grasp_mm = z_m * 1000.0
@@ -684,18 +804,30 @@ class Arm2ScoopingGrasp(Node):
             if ret != 0:
                 return False, f'Failed to close gripper (code={ret}).'
 
-            # TODO: if tilt bowl mode, put code to raise bowl and tilt here
-            # ret = self._move_to_mm(x_mm, y_mm, z_lift_mm, roll, pitch, yaw)
-            # if ret != 0:
-            #     response.success = False
-            #     response.message = f'Failed to move to lift pose (code={ret}).'
-            #     return response
-
             message = (
                 f'Grasp succeeded using {source_name} at {self.target_frame}: '
                 f'x={x_mm:.1f}mm, y={y_mm:.1f}mm, z={z_grasp_mm:.1f}mm'
             )
             self.get_logger().info(message)
+
+            # TODO: RAISE BOWL UP FIRST
+            # Raise the bowl vertically up first to avoid collisions during tilt
+            # Coordinate frame is 45 deg rotated anticlockwise, so x is forward/backward, y is diagnal left/right, z is  diagonal up/down 
+            # Move the arm up by 100mm vertically up first before tilting to reduce risk of collision with other bowls
+            ret=self._move_to_mm(x_mm, y_mm + 100.0*math.sin(math.radians(-45)), z_grasp_mm + 100.0*math.cos(math.radians(-45)), roll, pitch, yaw)
+            if ret != 0:
+                return False, f'Failed to move to raised pose (code={ret}).'
+
+            # Final tilt bowl pose 
+            final_tilt_6dof = [386.7, -379.2, -101.6, math.radians(166.9), math.radians(-15.2), math.radians(-62.8)]
+            ret = self._move_to_mm(final_tilt_6dof[0], final_tilt_6dof[1], final_tilt_6dof[2], final_tilt_6dof[3], final_tilt_6dof[4], final_tilt_6dof[5])
+            if ret != 0:
+                return False, f'Failed to move to tilt pose (code={ret}).'
+            
+            ret = self._vibrate_arm()
+            if ret != 0:
+                return False, f'Failed to vibrate arm (code={ret}).'
+
             return True, message
         except Exception as exc:
             message = f'Unhandled grasp failure: {exc}'
@@ -709,6 +841,26 @@ class Arm2ScoopingGrasp(Node):
         response.success = success
         response.message = message
         return response
+
+    def move_to_saved_initial_pose_callback(self, _request, response):
+        if not self._grasp_lock.acquire(blocking=False):
+            response.success = False
+            response.message = 'Another grasp or return motion is already in progress.'
+            return response
+
+        try:
+            success, message = self._move_to_saved_initial_pose()
+            response.success = success
+            response.message = message
+            return response
+        except Exception as exc:
+            message = f'Unhandled return-to-initial-pose failure: {exc}'
+            self.get_logger().error(message)
+            response.success = False
+            response.message = message
+            return response
+        finally:
+            self._grasp_lock.release()
 
     def disconnect_arm(self):
         if self.arm is None:
