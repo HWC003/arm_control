@@ -10,6 +10,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.time import Time
 from std_srvs.srv import Trigger
 from tf2_geometry_msgs import do_transform_point
@@ -116,6 +117,9 @@ class Arm2ScoopingGrasp(Node):
         self.declare_parameter('return_to_init_service_name', 'arm2/return_to_saved_initial_pose')
         self.declare_parameter('selected_bowl_idx', -1)
         self.declare_parameter('auto_execute_on_index_set', True)
+        self.declare_parameter('auto_execute_done_seq', 0)
+        self.declare_parameter('auto_execute_status', 'idle')
+        self.declare_parameter('auto_execute_message', 'Idle.')
         self.declare_parameter('target_frame', 'xarm2_base')
         self.declare_parameter('tf_timeout_sec', 1.0)
         self.declare_parameter('service_timeout_sec', 5.0)
@@ -188,6 +192,9 @@ class Arm2ScoopingGrasp(Node):
         self.gripper_close_pos = float(self.get_parameter('gripper_close_pos').value)
         self.gripper_speed = float(self.get_parameter('gripper_speed').value)
         self.auto_execute_on_index_set = bool(self.get_parameter('auto_execute_on_index_set').value)
+        self._auto_execute_done_seq = int(self.get_parameter('auto_execute_done_seq').value)
+        self._auto_execute_status = str(self.get_parameter('auto_execute_status').value)
+        self._auto_execute_message = str(self.get_parameter('auto_execute_message').value)
 
         self.use_workspace_limits = bool(self.get_parameter('use_workspace_limits').value)
         self.workspace_min_xyz = list(self.get_parameter('workspace_min_xyz').value)
@@ -359,8 +366,25 @@ class Arm2ScoopingGrasp(Node):
                 if idx >= 0:
                     self._pending_auto_idx = idx
                     self._pending_auto_execute = True
+                    self._auto_execute_status = 'pending'
+                    self._auto_execute_message = (
+                        f'Pending auto execute for selected_bowl_idx={idx}.'
+                    )
+                    self._update_auto_execute_status_params()
 
         return result
+
+    def _update_auto_execute_status_params(self):
+        try:
+            self.set_parameters([
+                Parameter('auto_execute_done_seq', value=int(self._auto_execute_done_seq)),
+                Parameter('auto_execute_status', value=str(self._auto_execute_status)),
+                Parameter('auto_execute_message', value=str(self._auto_execute_message)),
+            ])
+        except Exception as exc:
+            self.get_logger().warning(
+                f'Failed to update auto-execute status parameters: {exc}'
+            )
 
     def _auto_execute_timer_cb(self):
         if not self.auto_execute_on_index_set:
@@ -374,7 +398,18 @@ class Arm2ScoopingGrasp(Node):
         idx = self._pending_auto_idx
         self._pending_auto_execute = False
 
+        self._auto_execute_status = 'running'
+        self._auto_execute_message = (
+            f'Auto execute started for selected_bowl_idx={idx}.'
+        )
+        self._update_auto_execute_status_params()
+
         success, message = self._execute_grasp()
+        self._auto_execute_done_seq += 1
+        self._auto_execute_status = 'succeeded' if success else 'failed'
+        self._auto_execute_message = message
+        self._update_auto_execute_status_params()
+
         if success:
             self.get_logger().info(
                 f'Auto-executed grasp for selected_bowl_idx={idx}: {message}'
@@ -600,6 +635,59 @@ class Arm2ScoopingGrasp(Node):
             and min_z <= z_mm <= max_z
         )
 
+    @staticmethod
+    def _extract_xarm_value(resp, default_code=0):
+        if isinstance(resp, tuple):
+            if len(resp) >= 2:
+                return int(resp[0]), resp[1]
+            if len(resp) == 1:
+                return default_code, resp[0]
+        return default_code, resp
+
+    def _is_arm_motion_active(self):
+        # Prefer get_is_moving when available; fall back to controller state.
+        try:
+            code, moving = self._extract_xarm_value(self.arm.get_is_moving())
+            if code == 0:
+                return bool(moving), None
+        except Exception:
+            pass
+
+        try:
+            code, state = self._extract_xarm_value(self.arm.get_state())
+            if code == 0:
+                # xArm state=1 indicates moving.
+                return int(state) == 1, None
+            return None, f'get_state returned code={code}'
+        except Exception as exc:
+            return None, f'Unable to query arm motion state: {exc}'
+
+    def _wait_for_arm_idle(self, timeout_sec=15.0, poll_sec=0.05):
+        deadline = time.time() + float(timeout_sec)
+        last_error = None
+        consecutive_idle = 0
+
+        while rclpy.ok() and time.time() < deadline:
+            moving, err = self._is_arm_motion_active()
+
+            if moving is None:
+                return False, err or 'Arm motion status is unavailable.'
+
+            if moving:
+                consecutive_idle = 0
+            else:
+                consecutive_idle += 1
+                if consecutive_idle >= 3:
+                    return True, None
+
+            last_error = err
+            time.sleep(float(poll_sec))
+
+        return False, (
+            f'Arm did not become idle within {float(timeout_sec):.1f}s '
+            f'(last_error={last_error}).'
+        )
+
     def _move_to_saved_initial_pose(self):
         selected_idx, resolved_tag_id, map_error = self._resolve_selected_bowl_tag()
         if map_error is not None:
@@ -649,6 +737,11 @@ class Arm2ScoopingGrasp(Node):
             f'Moved to saved initial pose for tag_id={resolved_tag_id} at {self.target_frame}: '
             f'x={x_mm:.1f}mm, y={y_mm:.1f}mm, z={z_mm:.1f}mm (gripper closed).'
         )
+
+        idle_ok, idle_err = self._wait_for_arm_idle(timeout_sec=10.0)
+        if not idle_ok:
+            return False, f'Return motion completion check failed: {idle_err}'
+
         self.get_logger().info(message)
         return True, message
 
@@ -827,6 +920,11 @@ class Arm2ScoopingGrasp(Node):
             ret = self._vibrate_arm()
             if ret != 0:
                 return False, f'Failed to vibrate arm (code={ret}).'
+
+            # Do not report success until arm motion has fully settled.
+            idle_ok, idle_err = self._wait_for_arm_idle(timeout_sec=10.0)
+            if not idle_ok:
+                return False, f'Grasp completion check failed: {idle_err}'
 
             return True, message
         except Exception as exc:
