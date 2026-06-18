@@ -750,6 +750,9 @@ class Arm2ScoopingGrasp(Node):
         if not self._grasp_lock.acquire(blocking=False):
             return False, 'Grasp already in progress.'
 
+        approach_6dof  = [470.8, -12.9, -120.8, math.radians(-176.7), math.radians(-42.3), math.radians(-90.6)]
+        final_tilt_6dof = [386.7, -379.2, -101.6, math.radians(166.9), math.radians(-15.2), math.radians(-62.8)]
+
         try:
             selected_idx, resolved_tag_id, map_error = self._resolve_selected_bowl_tag()
             if map_error is not None:
@@ -780,7 +783,6 @@ class Arm2ScoopingGrasp(Node):
             apriltag_frame = None
             apriltag_error = None
             skip_regrasp = False
-
 
             if self.use_apriltag_target:
                 for attempt in range(1, self.apriltag_request_retries + 2):
@@ -815,6 +817,9 @@ class Arm2ScoopingGrasp(Node):
                     else:
                         roll, pitch, yaw = self._get_orientation()
                 elif not self.fallback_to_bowl_centroid:
+                    ret = self._move_to_mm(approach_6dof[0], approach_6dof[1], approach_6dof[2], approach_6dof[3], approach_6dof[4], approach_6dof[5])
+                    if ret != 0:
+                        return False, f'Failed to move to approach pose (code={ret}).'
                     return False, f'AprilTag targeting failed and fallback disabled: {apriltag_error}'
 
             if x_m is None:
@@ -859,48 +864,8 @@ class Arm2ScoopingGrasp(Node):
                 f'x={init_pose_6dof[0]:.1f}mm, y={init_pose_6dof[1]:.1f}mm, z={init_pose_6dof[2]:.1f}mm'
             )
 
-            final_tilt_6dof = [386.7, -379.2, -101.6, math.radians(166.9), math.radians(-15.2), math.radians(-62.8)]
-
             if selected_idx == self._last_successful_selected_bowl_idx:
                 skip_regrasp = True
-                # self.get_logger().info(
-                #     f'selected_bowl_idx={selected_idx} matches previous successful grasp. '
-                #     'Skipping re-grasp motions and moving directly to final tilt pose.'
-                # )
-
-                # ret = self._set_gripper_position(self.gripper_close_pos)
-                # if ret != 0:
-                #     return False, f'Failed to keep gripper closed before direct tilt move (code={ret}).'
-
-                # ret=self._move_to_mm(x_mm, y_mm + 100.0*math.sin(math.radians(-45)), z_grasp_mm + 100.0*math.cos(math.radians(-45)), roll, pitch, yaw)
-                # if ret != 0:
-                #     return False, f'Failed to move to raised pose (code={ret}).'
-
-                # ret = self._move_to_mm(
-                #     final_tilt_6dof[0],
-                #     final_tilt_6dof[1],
-                #     final_tilt_6dof[2],
-                #     final_tilt_6dof[3],
-                #     final_tilt_6dof[4],
-                #     final_tilt_6dof[5],
-                # )
-                # if ret != 0:
-                #     return False, f'Failed to move to tilt pose (code={ret}).'
-
-                # ret = self._vibrate_arm()
-                # if ret != 0:
-                #     return False, f'Failed to vibrate arm (code={ret}).'
-
-                # idle_ok, idle_err = self._wait_for_arm_idle(timeout_sec=10.0)
-                # if not idle_ok:
-                #     return False, f'Grasp completion check failed: {idle_err}'
-
-                # message = (
-                #     f'Reused grasp for selected_bowl_idx={selected_idx}; '
-                #     'skipped re-grasp and executed direct final tilt motion.'
-                # )
-                # self.get_logger().info(message)
-                # return True, message
 
             x_mm = x_m * 1000.0
             y_mm = y_m * 1000.0
@@ -920,7 +885,6 @@ class Arm2ScoopingGrasp(Node):
                 # Fixed approach pose away from target to reduce risk of collision during approach
                 # x = 400.5mm, y = 18.2mm, z = -68.5mm, roll = -179.6 deg, pitch = -45.3 deg, yaw = -90.2 deg
                 # ret = self._move_to_mm(x_mm, y_mm, z_approach_mm, roll, pitch, yaw)
-                approach_6dof  = [470.8, -12.9, -120.8, math.radians(-176.7), math.radians(-42.3), math.radians(-90.6)]
                 ret = self._move_to_mm(approach_6dof[0], approach_6dof[1], approach_6dof[2], approach_6dof[3], approach_6dof[4], approach_6dof[5])
                 if ret != 0:
                     return False, f'Failed to move to approach pose (code={ret}).'
@@ -978,6 +942,8 @@ class Arm2ScoopingGrasp(Node):
         except Exception as exc:
             message = f'Unhandled grasp failure: {exc}'
             self.get_logger().error(message)
+            self.get_logger().info('Attempting to move to safe approach pose after failure.')
+            ret = self._move_to_mm(approach_6dof[0], approach_6dof[1], approach_6dof[2], approach_6dof[3], approach_6dof[4], approach_6dof[5])
             return False, message
         finally:
             self._grasp_lock.release()
