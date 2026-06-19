@@ -750,7 +750,7 @@ class Arm2ScoopingGrasp(Node):
         if not self._grasp_lock.acquire(blocking=False):
             return False, 'Grasp already in progress.'
 
-        approach_6dof  = [470.8, -12.9, -120.8, math.radians(-176.7), math.radians(-42.3), math.radians(-90.6)]
+        approach_6dof  = [429.1, 31.5, -77.7, math.radians(-168.7), math.radians(-44.4), math.radians(-88.7)]
         final_tilt_6dof = [386.7, -379.2, -101.6, math.radians(166.9), math.radians(-15.2), math.radians(-62.8)]
 
         try:
@@ -835,6 +835,7 @@ class Arm2ScoopingGrasp(Node):
 
                 if point_msg is None:
                     if apriltag_error is not None:
+                        # ret = self._move_to_mm(approach_6dof[0], approach_6dof[1], approach_6dof[2], approach_6dof[3], approach_6dof[4], approach_6dof[5])
                         return False, (
                             f'Both target sources failed. AprilTag error: {apriltag_error}; '
                             f'Scooping error: {last_error}'
@@ -902,6 +903,11 @@ class Arm2ScoopingGrasp(Node):
 
                 ret = self._move_to_mm(x_mm, y_mm, z_grasp_mm, roll, pitch, yaw)
                 if ret != 0:
+                    #Clear error and move back to approach pose to avoid collision with bowl
+                    self.arm.clean_error()
+                    self.arm.motion_enable(enable=True) 
+                    self.arm.set_state(0)
+                    ret = self._move_to_mm(approach_6dof[0], approach_6dof[1], approach_6dof[2], approach_6dof[3], approach_6dof[4], approach_6dof[5])
                     return False, f'Failed to move to grasp pose (code={ret}).'
 
                 ret = self._set_gripper_position(self.gripper_close_pos)
@@ -943,6 +949,9 @@ class Arm2ScoopingGrasp(Node):
             message = f'Unhandled grasp failure: {exc}'
             self.get_logger().error(message)
             self.get_logger().info('Attempting to move to safe approach pose after failure.')
+            self.arm.clean_error()
+            self.arm.motion_enable(enable=True)
+            self.arm.set_state(0)
             ret = self._move_to_mm(approach_6dof[0], approach_6dof[1], approach_6dof[2], approach_6dof[3], approach_6dof[4], approach_6dof[5])
             return False, message
         finally:
