@@ -3,6 +3,7 @@ import math
 import threading
 import time
 
+import numpy as np
 import rclpy
 from geometry_msgs.msg import PointStamped
 from rcl_interfaces.msg import SetParametersResult
@@ -17,7 +18,10 @@ from tf2_geometry_msgs import do_transform_point
 from tf2_ros import (Buffer, ConnectivityException, ExtrapolationException,
                      LookupException, TransformListener)
 
-from feeding_msgs.srv import GetScoopingPoint
+from feeding_msgs.srv import GetBowlFoodRatio, GetScoopingPoint
+from feeding_mujoco.feeding_mujoco.tb_scoop_model_optimiser import TiltOptimiser
+from feeding_mujoco.feeding_mujoco.tb_scoop_traj_generator import get_new_bowl_pose
+# from feeding_mujoco.feeding_mujoco.tb_scoop_volume_mass_model import VolumeMassModel
 from xarm.wrapper import XArmAPI
 
 
@@ -153,6 +157,19 @@ class Arm2ScoopingGrasp(Node):
         self.declare_parameter('gripper_close_pos', 120.0)
         self.declare_parameter('gripper_speed', 2000.0)
 
+        # Adaptive bowl-tilt parameters
+        self.declare_parameter('get_bowl_food_ratio_service', 'food_perception/get_bowl_food_ratio')
+        # Desired bite size (grams). Set by task_planner before triggering the grasp.
+        self.declare_parameter('target_scoop_ml', 8.0)
+        # Predetermined pose (mm, rad) from which to estimate the bowl food volume.
+        # Placeholder default reuses the final tilt pose; update with a real pose later.
+        self.declare_parameter(
+            'volume_estimation_pose_6dof',
+            [292.7, -54.2, 33.9, math.radians(-160.5), math.radians(-39.2), math.radians(-121.8)],
+        )
+        # Last computed optimal tilt angle (deg). Exposed for the task_planner to read.
+        self.declare_parameter('last_tilt_angle_deg', 0.0)
+
         # Optional workspace safety limits in mm (target frame)
         self.declare_parameter('use_workspace_limits', False)
         self.declare_parameter('workspace_min_xyz', [200.0, -400.0, 80.0])
@@ -196,9 +213,18 @@ class Arm2ScoopingGrasp(Node):
         self._auto_execute_status = str(self.get_parameter('auto_execute_status').value)
         self._auto_execute_message = str(self.get_parameter('auto_execute_message').value)
 
+        self.bowl_food_ratio_service_name = self.get_parameter('get_bowl_food_ratio_service').value
+        self.target_scoop_ml = float(self.get_parameter('target_scoop_ml').value)
+        self.volume_estimation_pose_6dof = [
+            float(v) for v in self.get_parameter('volume_estimation_pose_6dof').value
+        ]
+
         self.use_workspace_limits = bool(self.get_parameter('use_workspace_limits').value)
         self.workspace_min_xyz = list(self.get_parameter('workspace_min_xyz').value)
         self.workspace_max_xyz = list(self.get_parameter('workspace_max_xyz').value)
+
+        if len(self.volume_estimation_pose_6dof) != 6:
+            raise ValueError('volume_estimation_pose_6dof must have exactly 6 values [x, y, z, roll, pitch, yaw].')
 
         if len(self.target_orientation_rpy) != 3:
             raise ValueError('target_orientation_rpy must have exactly 3 values [roll, pitch, yaw].')
@@ -234,6 +260,16 @@ class Arm2ScoopingGrasp(Node):
             self.scooping_service_name,
             callback_group=self._callback_group,
         )
+
+        self._bowl_food_ratio_client = self.create_client(
+            GetBowlFoodRatio,
+            self.bowl_food_ratio_service_name,
+            callback_group=self._callback_group,
+        )
+
+        # Adaptive tilt models: detected volume -> mass, and mass -> optimal tilt angle.
+        # self._volume_mass_model = VolumeMassModel()
+        self._tilt_optimiser = TiltOptimiser()
 
         self._trigger_srv = self.create_service(
             Trigger,
@@ -494,6 +530,57 @@ class Arm2ScoopingGrasp(Node):
 
         return resp.bowl_centroids[idx], None
 
+    def _call_get_bowl_food_ratio(self):
+        """Query GetBowlFoodRatio and return (detected_volume_m3, error_message)."""
+        if not self._bowl_food_ratio_client.wait_for_service(timeout_sec=1.0):
+            return None, 'GetBowlFoodRatio service is unavailable.'
+
+        req = GetBowlFoodRatio.Request()
+        future = self._bowl_food_ratio_client.call_async(req)
+
+        deadline = time.time() + self.service_timeout_sec
+        while rclpy.ok() and not future.done() and time.time() < deadline:
+            time.sleep(0.02)
+
+        if not future.done():
+            return None, f'GetBowlFoodRatio call timed out after {self.service_timeout_sec:.1f}s.'
+
+        if future.exception() is not None:
+            return None, f'GetBowlFoodRatio call failed: {future.exception()}'
+
+        resp = future.result()
+        if resp is None:
+            return None, 'GetBowlFoodRatio returned no response.'
+
+        if not resp.success:
+            return None, 'GetBowlFoodRatio returned success=false.'
+
+        if len(resp.reference_food_volumes_m3) == 0:
+            return None, 'GetBowlFoodRatio returned no reference_food_volumes_m3.'
+
+        # The point-cloud volume is attached to the first bowl only.
+        if len(resp.reference_used) > 0 and not bool(resp.reference_used[0]):
+            return None, (
+                'Empty-bowl reference is missing or stale; detected food volume is invalid. '
+                'Capture an empty-bowl reference before running an adaptive tilt scoop.'
+            )
+
+        volume_m3 = float(resp.reference_food_volumes_m3[0])
+        if volume_m3 <= 0.0:
+            return None, f'Detected food volume is non-positive ({volume_m3:.3e} m^3).'
+
+        return volume_m3, None
+
+    def _update_last_tilt_angle_param(self, angle_deg):
+        try:
+            self.set_parameters([
+                Parameter('last_tilt_angle_deg', value=float(angle_deg)),
+            ])
+        except Exception as exc:
+            self.get_logger().warning(
+                f'Failed to update last_tilt_angle_deg parameter: {exc}'
+            )
+
     def _transform_point_to_target(self, src_point: PointStamped):
         source_frame = src_point.header.frame_id
         if not source_frame:
@@ -751,7 +838,6 @@ class Arm2ScoopingGrasp(Node):
             return False, 'Grasp already in progress.'
 
         approach_6dof  = [429.1, 31.5, -77.7, math.radians(-168.7), math.radians(-44.4), math.radians(-88.7)]
-        final_tilt_6dof = [386.7, -379.2, -101.6, math.radians(166.9), math.radians(-15.2), math.radians(-62.8)]
 
         try:
             selected_idx, resolved_tag_id, map_error = self._resolve_selected_bowl_tag()
@@ -928,14 +1014,49 @@ class Arm2ScoopingGrasp(Node):
             if ret != 0:
                 return False, f'Failed to move to raised pose (code={ret}).'
 
-            # Final tilt bowl pose 
-            ret = self._move_to_mm(final_tilt_6dof[0], final_tilt_6dof[1], final_tilt_6dof[2], final_tilt_6dof[3], final_tilt_6dof[4], final_tilt_6dof[5])
+            # Move to the predetermined pose from which to estimate the bowl food volume.
+            vol_pose = self.volume_estimation_pose_6dof
+            ret = self._move_to_mm(vol_pose[0], vol_pose[1], vol_pose[2], vol_pose[3], vol_pose[4], vol_pose[5])
+            if ret != 0:
+                return False, f'Failed to move to volume-estimation pose (code={ret}).'
+
+            # Estimate the detected food volume and map it to an optimal bowl tilt angle.
+            volume_m3, volume_err = self._call_get_bowl_food_ratio()
+            if volume_m3 is None:
+                return False, f'Failed to estimate bowl food volume: {volume_err}'
+
+            # food_mass_g = self._volume_mass_model.predict(volume_m3)
+            # Convert volume_m3 to ml
+            volume_ml = volume_m3 * 1e6
+
+            best_angle_deg = self._tilt_optimiser.get_optimal_tilt(volume_ml, self.target_scoop_ml)
+            if best_angle_deg is None:
+                return False, (
+                    f'Tilt optimiser failed to compute an angle '
+                    f'(volume={volume_m3:.3e} m^3, {volume_ml:.1f} ml, target={self.target_scoop_ml:.2f} ml).'
+                )
+            best_angle_deg = float(best_angle_deg)
+
+            self.get_logger().info(
+                f'Adaptive tilt: detected_volume={volume_m3:.3e} m^3, {volume_ml:.2f} ml, '
+                f'target_scoop={self.target_scoop_ml:.2f} ml -> best_angle={best_angle_deg:.2f} deg.'
+            )
+
+            # Tilt the bowl to the computed pose.
+            bowl_tilted_pose = get_new_bowl_pose(best_angle_deg)
+            ret = self._move_to_mm(
+                bowl_tilted_pose[0], bowl_tilted_pose[1], bowl_tilted_pose[2],
+                bowl_tilted_pose[3], bowl_tilted_pose[4], bowl_tilted_pose[5],
+            )
             if ret != 0:
                 return False, f'Failed to move to tilt pose (code={ret}).'
-            
+
             ret = self._vibrate_arm()
             if ret != 0:
                 return False, f'Failed to vibrate arm (code={ret}).'
+
+            # Publish the computed angle so the task_planner can drive the lite6 trajectory.
+            self._update_last_tilt_angle_param(best_angle_deg)
 
             # Do not report success until arm motion has fully settled.
             idle_ok, idle_err = self._wait_for_arm_idle(timeout_sec=10.0)
