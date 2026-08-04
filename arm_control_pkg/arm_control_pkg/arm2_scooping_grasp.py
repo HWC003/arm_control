@@ -19,8 +19,8 @@ from tf2_ros import (Buffer, ConnectivityException, ExtrapolationException,
                      LookupException, TransformListener)
 
 from feeding_msgs.srv import GetBowlFoodRatio, GetScoopingPoint
-from feeding_mujoco.feeding_mujoco.tb_scoop_model_optimiser import TiltOptimiser
-from feeding_mujoco.feeding_mujoco.tb_scoop_traj_generator import get_new_bowl_pose
+from feeding_mujoco.tb_scoop_model_optimiser import TiltOptimiser
+from feeding_mujoco.tb_scoop_traj_generator import get_new_bowl_pose
 # from feeding_mujoco.feeding_mujoco.tb_scoop_volume_mass_model import VolumeMassModel
 from xarm.wrapper import XArmAPI
 
