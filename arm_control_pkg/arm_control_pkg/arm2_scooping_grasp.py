@@ -5,7 +5,6 @@ import time
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import PointStamped
 from rcl_interfaces.msg import SetParametersResult
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.duration import Duration
@@ -14,11 +13,10 @@ from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.time import Time
 from std_srvs.srv import Trigger
-from tf2_geometry_msgs import do_transform_point
 from tf2_ros import (Buffer, ConnectivityException, ExtrapolationException,
                      LookupException, TransformListener)
 
-from feeding_msgs.srv import GetBowlFoodRatio, GetScoopingPoint
+from feeding_msgs.srv import GetBowlFoodRatio
 from feeding_mujoco.tb_scoop_model_optimiser import TiltOptimiser
 from feeding_mujoco.tb_scoop_traj_generator import get_new_bowl_pose
 # from feeding_mujoco.feeding_mujoco.tb_scoop_volume_mass_model import VolumeMassModel
@@ -104,11 +102,11 @@ class Arm2ScoopingGrasp(Node):
     """Service-triggered grasp node for a second xArm6.
 
     Flow:
-    1) Request AprilTag target pose (optional primary source).
-    2) If unavailable, optionally fall back to GetScoopingPoint bowl centroid.
-    3) Convert target pose to xArm command pose.
+    1) Resolve the selected bowl to its configured AprilTag.
+    2) Request the AprilTag target pose.
+    3) Convert the target pose to an xArm command pose.
     4) Execute open -> approach -> close -> lift sequence.
-    5) If selected bowl maps to no tag, skip arm motion as a no-op.
+    5) If the selected bowl maps to no tag, skip arm motion as a no-op.
     """
 
     def __init__(self):
@@ -116,7 +114,6 @@ class Arm2ScoopingGrasp(Node):
 
         # Core connectivity
         self.declare_parameter('robot_ip', '192.168.1.201')
-        self.declare_parameter('get_scooping_point_service', 'food_perception/get_scooping_point')
         self.declare_parameter('trigger_service_name', 'arm2/execute_grasp')
         self.declare_parameter('return_to_init_service_name', 'arm2/return_to_saved_initial_pose')
         self.declare_parameter('selected_bowl_idx', -1)
@@ -127,10 +124,6 @@ class Arm2ScoopingGrasp(Node):
         self.declare_parameter('target_frame', 'xarm2_base')
         self.declare_parameter('tf_timeout_sec', 1.0)
         self.declare_parameter('service_timeout_sec', 5.0)
-        self.declare_parameter('request_retries', 2)
-        self.declare_parameter('use_apriltag_target', True)
-        self.declare_parameter('fallback_to_bowl_centroid', False)
-        self.declare_parameter('apriltag_target_id', 0)
         self.declare_parameter('bowl_idx_to_tag_id', [-1, 1, 0])
         self.declare_parameter('tag_frame_templates', ['tag36h11:{id}', 'tag{id}', 'tag_{id}'])
         self.declare_parameter('tag_to_gripper_xyz', [0.0, 0.0, 0.0])
@@ -176,16 +169,11 @@ class Arm2ScoopingGrasp(Node):
         self.declare_parameter('workspace_max_xyz', [700.0, 400.0, 500.0])
 
         self.robot_ip = self.get_parameter('robot_ip').value
-        self.scooping_service_name = self.get_parameter('get_scooping_point_service').value
         self.trigger_service_name = self.get_parameter('trigger_service_name').value
         self.return_to_init_service_name = self.get_parameter('return_to_init_service_name').value
         self.target_frame = self.get_parameter('target_frame').value
         self.tf_timeout_sec = float(self.get_parameter('tf_timeout_sec').value)
         self.service_timeout_sec = float(self.get_parameter('service_timeout_sec').value)
-        self.request_retries = int(self.get_parameter('request_retries').value)
-        self.use_apriltag_target = bool(self.get_parameter('use_apriltag_target').value)
-        self.fallback_to_bowl_centroid = bool(self.get_parameter('fallback_to_bowl_centroid').value)
-        self.apriltag_target_id = int(self.get_parameter('apriltag_target_id').value)
         self.bowl_idx_to_tag_id = list(self.get_parameter('bowl_idx_to_tag_id').value)
         self.tag_frame_templates = [str(v) for v in self.get_parameter('tag_frame_templates').value]
         self.tag_to_gripper_xyz = [float(v) for v in self.get_parameter('tag_to_gripper_xyz').value]
@@ -254,12 +242,6 @@ class Arm2ScoopingGrasp(Node):
 
         self.tf_buffer = Buffer(cache_time=Duration(seconds=30.0))
         self.tf_listener = TransformListener(self.tf_buffer, self)
-
-        self._scooping_client = self.create_client(
-            GetScoopingPoint,
-            self.scooping_service_name,
-            callback_group=self._callback_group,
-        )
 
         self._bowl_food_ratio_client = self.create_client(
             GetBowlFoodRatio,
@@ -503,50 +485,6 @@ class Arm2ScoopingGrasp(Node):
         if ret_speed != 0:
             self.get_logger().warn(f"set_gripper_speed returned {ret_speed}")
 
-    def _call_get_scooping_point(self):
-        if not self._scooping_client.wait_for_service(timeout_sec=1.0):
-            return None, 'GetScoopingPoint service is unavailable.'
-
-        req = GetScoopingPoint.Request()
-        future = self._scooping_client.call_async(req)
-
-        deadline = time.time() + self.service_timeout_sec
-        while rclpy.ok() and not future.done() and time.time() < deadline:
-            time.sleep(0.02)
-
-        if not future.done():
-            return None, f'GetScoopingPoint call timed out after {self.service_timeout_sec:.1f}s.'
-
-        if future.exception() is not None:
-            return None, f'GetScoopingPoint call failed: {future.exception()}'
-
-        resp = future.result()
-        if resp is None:
-            return None, 'GetScoopingPoint returned no response.'
-
-        if not resp.success:
-            return None, 'GetScoopingPoint returned success=false.'
-
-        if len(resp.bowl_centroids) == 0:
-            return None, 'GetScoopingPoint returned no bowl centroids.'
-
-        idx = int(self.get_parameter('selected_bowl_idx').value)
-        if idx < 0:
-            return None, (
-                f'selected_bowl_idx is {idx}. Manager must set selected_bowl_idx before calling trigger.'
-            )
-
-        if idx < 0 or idx >= len(resp.bowl_centroids):
-            return None, (
-                f'selected_bowl_idx out of bounds: {idx} for {len(resp.bowl_centroids)} centroids.'
-            )
-
-        self.get_logger().info(
-            f'Using bowl centroid at selected_bowl_idx={idx} as grasp target source.'
-        )
-
-        return resp.bowl_centroids[idx], None
-
     def _call_get_bowl_food_ratio(self):
         """Query GetBowlFoodRatio and return (detected_volume_m3, error_message)."""
         if not self._bowl_food_ratio_client.wait_for_service(timeout_sec=1.0):
@@ -572,17 +510,13 @@ class Arm2ScoopingGrasp(Node):
         if not resp.success:
             return None, 'GetBowlFoodRatio returned success=false.'
 
-        if len(resp.reference_food_volumes_m3) == 0:
-            return None, 'GetBowlFoodRatio returned no reference_food_volumes_m3.'
-
-        # The point-cloud volume is attached to the first bowl only.
-        if len(resp.reference_used) > 0 and not bool(resp.reference_used[0]):
+        if not bool(resp.reference_used):
             return None, (
                 'Empty-bowl reference is missing or stale; detected food volume is invalid. '
                 'Capture an empty-bowl reference before running an adaptive tilt scoop.'
             )
 
-        volume_m3 = float(resp.reference_food_volumes_m3[0])
+        volume_m3 = float(resp.reference_food_volume_m3)
         if volume_m3 <= 0.0:
             return None, f'Detected food volume is non-positive ({volume_m3:.3e} m^3).'
 
@@ -596,25 +530,6 @@ class Arm2ScoopingGrasp(Node):
         except Exception as exc:
             self.get_logger().warning(
                 f'Failed to update last_tilt_angle_deg parameter: {exc}'
-            )
-
-    def _transform_point_to_target(self, src_point: PointStamped):
-        source_frame = src_point.header.frame_id
-        if not source_frame:
-            return None, 'PointStamped has empty frame_id.'
-
-        try:
-            transform = self.tf_buffer.lookup_transform(
-                self.target_frame,
-                source_frame,
-                Time(),
-                timeout=Duration(seconds=self.tf_timeout_sec),
-            )
-            transformed = do_transform_point(src_point, transform)
-            return transformed, None
-        except (LookupException, ConnectivityException, ExtrapolationException) as exc:
-            return None, (
-                f'TF lookup failed for {source_frame} -> {self.target_frame}: {exc}'
             )
 
     def _resolve_selected_bowl_tag(self):
@@ -873,85 +788,50 @@ class Arm2ScoopingGrasp(Node):
                 f'Resolved selected_bowl_idx={selected_idx} to AprilTag ID {resolved_tag_id}.'
             )
 
-            source_name = 'bowl_centroid'
-            x_m = None
-            y_m = None
-            z_m = None
-            roll = None
-            pitch = None
-            yaw = None
-
             apriltag_pose = None
             apriltag_quat = None
             apriltag_frame = None
             apriltag_error = None
             skip_regrasp = False
 
-            if self.use_apriltag_target:
-                for attempt in range(1, self.apriltag_request_retries + 2):
-                    apriltag_pose, apriltag_quat, apriltag_frame, apriltag_error = self._lookup_apriltag_target_tf(
-                        resolved_tag_id
-                    )
-                    if apriltag_pose is not None:
-                        break
-                    self.get_logger().warn(
-                        f'AprilTag TF attempt {attempt}/{self.apriltag_request_retries + 1} '
-                        f'failed for tag_id={resolved_tag_id}: {apriltag_error}'
-                    )
-
+            for attempt in range(1, self.apriltag_request_retries + 2):
+                apriltag_pose, apriltag_quat, apriltag_frame, apriltag_error = self._lookup_apriltag_target_tf(
+                    resolved_tag_id
+                )
                 if apriltag_pose is not None:
-                    source_name = f'apriltag_tf:{apriltag_frame}'
-                    x_m = apriltag_pose[0] + float(self.point_offset_xyz[0])
-                    y_m = apriltag_pose[1] + float(self.point_offset_xyz[1])
-                    z_m = (
-                        apriltag_pose[2]
-                        + float(self.point_offset_xyz[2])
-                        + self.grasp_z_offset
-                    )
+                    break
+                self.get_logger().warn(
+                    f'AprilTag TF attempt {attempt}/{self.apriltag_request_retries + 1} '
+                    f'failed for tag_id={resolved_tag_id}: {apriltag_error}'
+                )
 
-                    if self.use_apriltag_orientation:
-                        q = apriltag_quat
-                        roll, pitch, yaw = quat_to_rpy(
-                            float(q[0]),
-                            float(q[1]),
-                            float(q[2]),
-                            float(q[3]),
-                        )
-                    else:
-                        roll, pitch, yaw = self._get_orientation()
-                elif not self.fallback_to_bowl_centroid:
-                    ret = self._move_to_mm(approach_6dof[0], approach_6dof[1], approach_6dof[2], approach_6dof[3], approach_6dof[4], approach_6dof[5])
-                    if ret != 0:
-                        return False, f'Failed to move to approach pose (code={ret}).'
-                    return False, f'AprilTag targeting failed and fallback disabled: {apriltag_error}'
+            if apriltag_pose is None:
+                ret = self._move_to_mm(
+                    approach_6dof[0], approach_6dof[1], approach_6dof[2],
+                    approach_6dof[3], approach_6dof[4], approach_6dof[5],
+                )
+                if ret != 0:
+                    return False, f'Failed to move to approach pose (code={ret}).'
+                return False, f'AprilTag targeting failed: {apriltag_error}'
 
-            if x_m is None:
-                point_msg = None
-                last_error = None
-                for attempt in range(1, self.request_retries + 2):
-                    point_msg, last_error = self._call_get_scooping_point()
-                    if point_msg is not None:
-                        break
-                    self.get_logger().warn(
-                        f'GetScoopingPoint attempt {attempt}/{self.request_retries + 1} failed: {last_error}'
-                    )
+            source_name = f'apriltag_tf:{apriltag_frame}'
+            x_m = apriltag_pose[0] + float(self.point_offset_xyz[0])
+            y_m = apriltag_pose[1] + float(self.point_offset_xyz[1])
+            z_m = (
+                apriltag_pose[2]
+                + float(self.point_offset_xyz[2])
+                + self.grasp_z_offset
+            )
 
-                if point_msg is None:
-                    if apriltag_error is not None:
-                        # ret = self._move_to_mm(approach_6dof[0], approach_6dof[1], approach_6dof[2], approach_6dof[3], approach_6dof[4], approach_6dof[5])
-                        return False, (
-                            f'Both target sources failed. AprilTag error: {apriltag_error}; '
-                            f'Scooping error: {last_error}'
-                        )
-                    return False, f'Failed to get scooping point: {last_error}'
-
-                transformed_point, tf_error = self._transform_point_to_target(point_msg)
-                if transformed_point is None:
-                    return False, tf_error
-
-                x_m = transformed_point.point.x + float(self.point_offset_xyz[0])
-                y_m = transformed_point.point.y + float(self.point_offset_xyz[1])
-                z_m = transformed_point.point.z + float(self.point_offset_xyz[2]) + self.grasp_z_offset
+            if self.use_apriltag_orientation:
+                q = apriltag_quat
+                roll, pitch, yaw = quat_to_rpy(
+                    float(q[0]),
+                    float(q[1]),
+                    float(q[2]),
+                    float(q[3]),
+                )
+            else:
                 roll, pitch, yaw = self._get_orientation()
 
             init_pose_6dof = [
