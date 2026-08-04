@@ -387,6 +387,23 @@ class Arm2ScoopingGrasp(Node):
         for param in params:
             if param.name == 'auto_execute_on_index_set':
                 self.auto_execute_on_index_set = bool(param.value)
+            elif param.name == 'target_scoop_ml':
+                try:
+                    target_scoop_ml = float(param.value)
+                except (TypeError, ValueError):
+                    result.successful = False
+                    result.reason = 'target_scoop_ml must be a number.'
+                    return result
+
+                if not math.isfinite(target_scoop_ml) or target_scoop_ml <= 0.0:
+                    result.successful = False
+                    result.reason = 'target_scoop_ml must be finite and greater than zero.'
+                    return result
+
+                self.target_scoop_ml = target_scoop_ml
+                self.get_logger().info(
+                    f'Updated target_scoop_ml to {self.target_scoop_ml:.2f} ml.'
+                )
             elif param.name == 'bowl_idx_to_tag_id':
                 try:
                     self.bowl_idx_to_tag_id = [int(v) for v in list(param.value)]

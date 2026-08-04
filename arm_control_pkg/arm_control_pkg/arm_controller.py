@@ -401,16 +401,17 @@ class ArmController(Node):
     def check_button_state_callback(self, request, response):
         """
         Service callback to check the button state.
-        Returns the C14 GPIO pin state (0 = pressed, 1 = not pressed).
+        Returns the ci0 GPIO pin state (0 = pressed, 1 = not pressed).
         """
         try:
+            self.get_logger().debug("Checking button state...")
             if request.check_state:
                 digital_inputs = self.arm.get_cgpio_digital()
-                # digital_inputs[1][0] is the C14 pin state
-                c14_state = digital_inputs[1][0]
-                response.button_state = c14_state
+                # digital_inputs[1][0] is the ci0 pin state
+                ci0_state = digital_inputs[1][0]
+                response.button_state = ci0_state
                 response.success = True
-                self.get_logger().debug(f"Button state: {c14_state}")
+                self.get_logger().debug(f"Button state: {ci0_state}")
             else:
                 response.button_state = -1
                 response.success = False
