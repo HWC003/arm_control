@@ -160,6 +160,10 @@ class Arm2ScoopingGrasp(Node):
             'volume_estimation_pose_6dof',
             [292.7, -54.2, 33.9, math.radians(-160.5), math.radians(-39.2), math.radians(-121.8)],
         )
+        self.declare_parameter('minimum_food_volume_m3', 1.5e-5)
+        self.declare_parameter('last_detected_food_volume_m3', 0.0)
+        self.declare_parameter('last_volume_check_selected_bowl_idx', -1)
+        self.declare_parameter('last_volume_check_completed', False)
         # Last computed optimal tilt angle (deg). Exposed for the task_planner to read.
         self.declare_parameter('last_tilt_angle_deg', 0.0)
 
@@ -206,6 +210,9 @@ class Arm2ScoopingGrasp(Node):
         self.volume_estimation_pose_6dof = [
             float(v) for v in self.get_parameter('volume_estimation_pose_6dof').value
         ]
+        self.minimum_food_volume_m3 = float(
+            self.get_parameter('minimum_food_volume_m3').value
+        )
 
         self.use_workspace_limits = bool(self.get_parameter('use_workspace_limits').value)
         self.workspace_min_xyz = list(self.get_parameter('workspace_min_xyz').value)
@@ -213,6 +220,11 @@ class Arm2ScoopingGrasp(Node):
 
         if len(self.volume_estimation_pose_6dof) != 6:
             raise ValueError('volume_estimation_pose_6dof must have exactly 6 values [x, y, z, roll, pitch, yaw].')
+        if (
+            not math.isfinite(self.minimum_food_volume_m3)
+            or self.minimum_food_volume_m3 <= 0.0
+        ):
+            raise ValueError('minimum_food_volume_m3 must be finite and greater than zero.')
 
         if len(self.target_orientation_rpy) != 3:
             raise ValueError('target_orientation_rpy must have exactly 3 values [roll, pitch, yaw].')
@@ -532,6 +544,19 @@ class Arm2ScoopingGrasp(Node):
                 f'Failed to update last_tilt_angle_deg parameter: {exc}'
             )
 
+    def _update_volume_check_status(self, selected_bowl_idx, volume_m3, completed):
+        """Publish a fresh volume result only after measurement at the fixed pose."""
+        try:
+            self.set_parameters([
+                Parameter('last_detected_food_volume_m3', value=float(volume_m3)),
+                Parameter('last_volume_check_selected_bowl_idx', value=int(selected_bowl_idx)),
+                Parameter('last_volume_check_completed', value=bool(completed)),
+            ])
+        except Exception as exc:
+            self.get_logger().warning(
+                f'Failed to update volume-check status parameters: {exc}'
+            )
+
     def _resolve_selected_bowl_tag(self):
         try:
             idx = int(self.get_parameter('selected_bowl_idx').value)
@@ -772,6 +797,10 @@ class Arm2ScoopingGrasp(Node):
         approach_6dof  = [429.1, 31.5, -77.7, math.radians(-168.7), math.radians(-44.4), math.radians(-88.7)]
 
         try:
+            # Prevent the manager from treating a previous bowl's measurement as
+            # the result for this grasp attempt.
+            self._update_volume_check_status(-1, 0.0, False)
+
             selected_idx, resolved_tag_id, map_error = self._resolve_selected_bowl_tag()
             if map_error is not None:
                 return False, map_error
@@ -917,10 +946,22 @@ class Arm2ScoopingGrasp(Node):
             if ret != 0:
                 return False, f'Failed to move to volume-estimation pose (code={ret}).'
 
-            # Estimate the detected food volume and map it to an optimal bowl tilt angle.
+            idle_ok, idle_err = self._wait_for_arm_idle(timeout_sec=10.0)
+            if not idle_ok:
+                return False, f'Volume-estimation pose completion check failed: {idle_err}'
+
+            # This service is intentionally called only after the xArm has reached
+            # and settled at volume_estimation_pose_6dof.
             volume_m3, volume_err = self._call_get_bowl_food_ratio()
             if volume_m3 is None:
                 return False, f'Failed to estimate bowl food volume: {volume_err}'
+
+            self._update_volume_check_status(selected_idx, volume_m3, True)
+            if volume_m3 < self.minimum_food_volume_m3:
+                return False, (
+                    f'Detected food volume ({volume_m3:.3e} m^3) is below the minimum '
+                    f'({self.minimum_food_volume_m3:.3e} m^3); skipping tilt-bowl scooping.'
+                )
 
             # food_mass_g = self._volume_mass_model.predict(volume_m3)
             # Convert volume_m3 to ml

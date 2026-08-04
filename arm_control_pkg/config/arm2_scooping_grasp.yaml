@@ -35,6 +35,10 @@ arm2_scooping_grasp:
     gripper_close_pos: 120.0
     gripper_speed: 2000.0
 
+    # Tilt-bowl scooping is skipped when the volume measured at
+    # volume_estimation_pose_6dof is below this threshold.
+    minimum_food_volume_m3: 1.5e-5
+
     use_workspace_limits: false
     workspace_min_xyz: [200.0, -400.0, 80.0]
     workspace_max_xyz: [700.0, 400.0, 500.0]
