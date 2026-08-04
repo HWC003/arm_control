@@ -22,7 +22,7 @@ class Arm2TagGraspCalibrationHelper(Node):
         super().__init__('arm2_tag_grasp_calibration_helper')
 
         self.declare_parameter('robot_ip', '192.168.1.201')
-        self.declare_parameter('camera_frame', 'orbbec_camera_color_optical_frame')
+        self.declare_parameter('camera_frame', 'orbbec_camera_link')
         self.declare_parameter('apriltag_target_id', 0)
         self.declare_parameter('tag_frame_templates', ['tag36h11:{id}', 'tag{id}', 'tag_{id}'])
         self.declare_parameter('tf_timeout_sec', 0.6)
