@@ -7,11 +7,14 @@ from rclpy.node import Node
 from rclpy.action import ActionServer
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from ament_index_python.packages import get_package_share_directory
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, String, UInt64
+from std_srvs.srv import SetBool, Trigger
 from feeding_msgs.srv import CheckButtonState, SetArmMode, ImpedanceControl
 from feeding_msgs.msg import SetPosition, GetPosition
 from feeding_msgs.action import MoveToPose
+from geometry_msgs.msg import Twist
 
 from bite_transfer.ft_sensor_spoon import M8128TCPClient
 from bite_transfer.sri_sensor_recorder import SensorRecorder
@@ -76,6 +79,7 @@ class ArmController(Node):
 
         # Step counter for SetPosition
         self.setPosCount = 0
+        self._cartesian_velocity_enabled = False
 
         # Callback Group
         self.parallel_group = ReentrantCallbackGroup()
@@ -84,9 +88,36 @@ class ArmController(Node):
         self._current_pose_pub = self.create_publisher(GetPosition, '/current_pose', 10)
 
         # Subscribers
-        self.move_to_point_sub = self.create_subscription(SetPosition, '/move_to_point', self.set_pose_callback, 10) #Used by bite_transfer.py and real_scooping_env.py to move to specific pose and position
-        self.pause_cmd_sub = self.create_subscription(Bool, '/pause_cmd', self.pause_callback, 1)
+        # A depth-one command queue is important for mouth tracking: a newer
+        # target must replace a pending older target instead of becoming the
+        # next waypoint in a backlog.
+        self.move_to_point_sub = self.create_subscription(
+            SetPosition,
+            '/move_to_point',
+            self.set_pose_callback,
+            1,
+        )
+        self.cartesian_velocity_sub = self.create_subscription(
+            Twist,
+            '/cartesian_velocity_cmd',
+            self.cartesian_velocity_callback,
+            1,
+        )
+        self.pause_cmd_sub = self.create_subscription(
+            Bool,
+            '/pause_cmd',
+            self.pause_callback,
+            1,
+            callback_group=self.parallel_group,
+        )
         self.led_state_sub = self.create_subscription(Bool, '/led_state', self.set_led_callback, 1)
+        completion_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.move_to_point_completed_pub = self.create_publisher(UInt64, '/move_to_point_completed', completion_qos)
+        self.move_to_point_completed_pub.publish(UInt64(data=self.setPosCount))
 
         #TODO: Remove this topic subscriber and use only the action server
         #self.execute_named_pose_sub = self.create_subscription(String, '/execute_named_pose', self.named_pose_topic_callback, 10) #Used by manager.py to move to specific poses based on pose name
@@ -123,6 +154,24 @@ class ArmController(Node):
         )
         self.get_logger().info("Impedance control service created")
 
+        # Separate recovery endpoint for streamed trajectories. Existing motion
+        # callbacks intentionally keep their current behaviour.
+        self.recover_motion_srv = self.create_service(
+            Trigger,
+            'recover_arm_motion',
+            self.recover_motion_callback,
+            callback_group=self.parallel_group,
+        )
+        self.get_logger().info("Recover arm motion service created")
+
+        self.cartesian_velocity_mode_srv = self.create_service(
+            SetBool,
+            'set_cartesian_velocity_mode',
+            self.set_cartesian_velocity_mode_callback,
+            callback_group=self.parallel_group,
+        )
+        self.get_logger().info("Cartesian velocity mode service created")
+
         # Action Servers
         self.move_to_pose_action_server = ActionServer(
             self,
@@ -142,6 +191,40 @@ class ArmController(Node):
     # ============================================================================
     # GENERAL xArm FUNCTIONS
     # ============================================================================
+
+    def recover_motion_callback(self, request, response):
+        """Clear an xArm motion error and return the arm to position mode."""
+        del request
+
+        operations = (
+            ("clean_error", self.arm.clean_error),
+            ("motion_enable", lambda: self.arm.motion_enable(enable=True)),
+            ("set_mode", lambda: self.arm.set_mode(0)),
+            ("set_state", lambda: self.arm.set_state(0)),
+        )
+        failures = []
+        for name, operation in operations:
+            try:
+                ret = operation()
+            except Exception as exc:
+                failures.append(f"{name} raised {exc}")
+                continue
+            if ret != 0:
+                failures.append(f"{name} returned {ret}")
+
+        if failures:
+            response.success = False
+            response.message = "; ".join(failures)
+            self.get_logger().error(
+                f"Failed to recover arm motion: {response.message}"
+            )
+            return response
+
+        self.is_paused = False
+        response.success = True
+        response.message = "Arm motion recovered"
+        self.get_logger().info(response.message)
+        return response
 
     def setup_arm(self, reset=False):
         """
@@ -220,11 +303,13 @@ class ArmController(Node):
         if self.is_paused:
             self.get_logger().warn("Ignoring new pose command because arm is currently paused")
             return
-        
-        self.arm.set_state(0)
-        current_state = self.arm.get_state()
-        # self.get_logger().info(f"xArm current state code: {current_state}")
-        
+
+        if self._cartesian_velocity_enabled:
+            self.get_logger().warn(
+                "Ignoring position command while mouth tracking velocity mode is active"
+            )
+            return
+
         ret = self.arm.set_position(
                 x=msg.target_point.x, y=msg.target_point.y, z=msg.target_point.z,
                 roll=msg.roll, pitch=msg.pitch, yaw=msg.yaw,
@@ -245,11 +330,74 @@ class ArmController(Node):
             self.get_logger().error(f"Failed to set position (error code: {ret})")
         else:
             self.setPosCount += 1
+            self.move_to_point_completed_pub.publish(
+                UInt64(data=self.setPosCount)
+            )
             self.get_logger().info(
                 f"[setPosCount={self.setPosCount}] Move success → "
                 f"pos=({msg.target_point.x:.3f}, {msg.target_point.y:.3f}, {msg.target_point.z:.3f}), "
                 f"rpy=({msg.roll:.2f}, {msg.pitch:.2f}, {msg.yaw:.2f})"
         )
+
+    def set_cartesian_velocity_mode_callback(self, request, response):
+        """Switch between mode 5 velocity tracking and mode 0 position control."""
+        if request.data:
+            ret = self.arm.set_mode(5)
+            if ret == 0:
+                ret = self.arm.set_state(0)
+            if ret == 0:
+                ret = self.arm.set_cartesian_velo_continuous(True)
+        else:
+            # Stop before returning to position mode.
+            self.arm.vc_set_cartesian_velocity(
+                [0.0] * 6,
+                is_radian=True,
+                duration=0.1,
+            )
+            ret = self.arm.set_cartesian_velo_continuous(False)
+            if ret == 0:
+                ret = self.arm.set_mode(0)
+            if ret == 0:
+                ret = self.arm.set_state(0)
+
+        if ret != 0:
+            response.success = False
+            response.message = f"Failed to switch Cartesian velocity mode: {ret}"
+            self.get_logger().error(response.message)
+            return response
+
+        self._cartesian_velocity_enabled = request.data
+        response.success = True
+        response.message = (
+            "Cartesian velocity tracking enabled"
+            if request.data
+            else "Position control restored"
+        )
+        self.get_logger().info(response.message)
+        return response
+
+    def cartesian_velocity_callback(self, msg):
+        """Apply the latest velocity command with a short dead-man timeout."""
+        if not self._cartesian_velocity_enabled or self.is_paused:
+            return
+
+        speeds = [
+            float(msg.linear.x),
+            float(msg.linear.y),
+            float(msg.linear.z),
+            float(msg.angular.x),
+            float(msg.angular.y),
+            float(msg.angular.z),
+        ]
+        ret = self.arm.vc_set_cartesian_velocity(
+            speeds,
+            is_radian=True,
+            duration=0.15,
+        )
+        if ret != 0:
+            self.get_logger().error(
+                f"Failed to apply Cartesian tracking velocity (error code: {ret})"
+            )
 
     #TODO: Remove this old topic-based callback and use only the action server
     # def named_pose_topic_callback(self, msg):
