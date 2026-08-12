@@ -950,6 +950,8 @@ class Arm2ScoopingGrasp(Node):
             if not idle_ok:
                 return False, f'Volume-estimation pose completion check failed: {idle_err}'
 
+            time.sleep(3.0)  # Allow time for the camera to settle and capture a clear point-cloud
+
             # This service is intentionally called only after the xArm has reached
             # and settled at volume_estimation_pose_6dof.
             volume_m3, volume_err = self._call_get_bowl_food_ratio()

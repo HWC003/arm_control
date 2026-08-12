@@ -47,7 +47,7 @@ class ArmController(Node):
 
         # Robot Parameters
         self.declare_parameter('robot_type', 'xarm6')
-        self.declare_parameter('robot_ip', '192.168.1.201')
+        self.declare_parameter('robot_ip', '192.168.1.190')
 
         self.robot_type = self.get_parameter('robot_type').get_parameter_value().string_value
         self.robot_ip = self.get_parameter('robot_ip').get_parameter_value().string_value
@@ -56,9 +56,15 @@ class ArmController(Node):
 
         self.declare_parameter('default_speed', 100)
         self.declare_parameter('default_accel', 50)
+        self.declare_parameter('tb_scoop_blend_radius_mm', 5.0)
 
         self.default_speed = self.get_parameter('default_speed').get_parameter_value().integer_value
         self.default_accel = self.get_parameter('default_accel').get_parameter_value().integer_value
+        self.tb_scoop_blend_radius_mm = float(
+            self.get_parameter('tb_scoop_blend_radius_mm').value
+        )
+        if self.tb_scoop_blend_radius_mm < 0.0:
+            raise ValueError('tb_scoop_blend_radius_mm must be non-negative.')
 
         # Robot Poses
         self.declare_parameter('poses.transfer_pose', [477.0, 0.1, 360.6, 0.0, -1.658, 3.141])
@@ -79,6 +85,7 @@ class ArmController(Node):
 
         # Step counter for SetPosition
         self.setPosCount = 0
+        self.tb_scoop_set_pos_count = 0
         self._cartesian_velocity_enabled = False
 
         # Callback Group
@@ -96,6 +103,15 @@ class ArmController(Node):
             '/move_to_point',
             self.set_pose_callback,
             1,
+        )
+        # Tilt-bowl trajectories must preserve every waypoint. Keep this separate
+        # from /move_to_point, whose depth-one latest-command behaviour is needed
+        # by mouth tracking and other existing users.
+        self.tb_scoop_move_to_point_sub = self.create_subscription(
+            SetPosition,
+            '/tb_scoop_move_to_point',
+            self.tb_scoop_set_pose_callback,
+            1000,
         )
         self.cartesian_velocity_sub = self.create_subscription(
             Twist,
@@ -118,6 +134,14 @@ class ArmController(Node):
         )
         self.move_to_point_completed_pub = self.create_publisher(UInt64, '/move_to_point_completed', completion_qos)
         self.move_to_point_completed_pub.publish(UInt64(data=self.setPosCount))
+        self.tb_scoop_move_to_point_completed_pub = self.create_publisher(
+            UInt64,
+            '/tb_scoop_move_to_point_completed',
+            completion_qos,
+        )
+        self.tb_scoop_move_to_point_completed_pub.publish(
+            UInt64(data=self.tb_scoop_set_pos_count)
+        )
 
         #TODO: Remove this topic subscriber and use only the action server
         #self.execute_named_pose_sub = self.create_subscription(String, '/execute_named_pose', self.named_pose_topic_callback, 10) #Used by manager.py to move to specific poses based on pose name
@@ -147,6 +171,7 @@ class ArmController(Node):
         )
         self.get_logger().info("Set arm mode service created")
 
+        # Not used in current bimanual lite6 xarm6 implementation 
         self.impedance_control_srv = self.create_service(
             ImpedanceControl,
             'impedance_control',
@@ -338,6 +363,51 @@ class ArmController(Node):
                 f"pos=({msg.target_point.x:.3f}, {msg.target_point.y:.3f}, {msg.target_point.z:.3f}), "
                 f"rpy=({msg.roll:.2f}, {msg.pitch:.2f}, {msg.yaw:.2f})"
         )
+
+    def tb_scoop_set_pose_callback(self, msg):
+        """Execute every tilt-bowl waypoint and acknowledge it separately."""
+        speed = msg.speed if msg.speed > 0 else self.default_speed
+        mvacc = msg.mvacc if msg.mvacc > 0 else self.default_accel
+
+        if self.is_paused:
+            self.get_logger().warn('Ignoring tilt-bowl waypoint because the arm is paused')
+            return
+        if self._cartesian_velocity_enabled:
+            self.get_logger().warn(
+                'Ignoring tilt-bowl waypoint while velocity mode is active'
+            )
+            return
+
+        ret = self.arm.set_position(
+            x=msg.target_point.x,
+            y=msg.target_point.y,
+            z=msg.target_point.z,
+            roll=msg.roll,
+            pitch=msg.pitch,
+            yaw=msg.yaw,
+            speed=speed,
+            mvacc=mvacc,
+            # Blend intermediate points instead of stopping at every waypoint.
+            # Radius zero on the final blocking command gives an exact endpoint.
+            radius=0.0 if msg.is_wait else self.tb_scoop_blend_radius_mm,
+            wait=msg.is_wait,
+            motion_type=msg.motion_type,
+        )
+        if ret != 0:
+            self.get_logger().error(
+                f'Failed tilt-bowl waypoint {self.tb_scoop_set_pos_count + 1} '
+                f'(xArm error code: {ret})'
+            )
+            return
+
+        self.tb_scoop_set_pos_count += 1
+        self.tb_scoop_move_to_point_completed_pub.publish(
+            UInt64(data=self.tb_scoop_set_pos_count)
+        )
+        if self.tb_scoop_set_pos_count % 100 == 0 or msg.is_wait:
+            self.get_logger().info(
+                f'Accepted tilt-bowl waypoint {self.tb_scoop_set_pos_count}'
+            )
 
     def set_cartesian_velocity_mode_callback(self, request, response):
         """Switch between mode 5 velocity tracking and mode 0 position control."""
