@@ -164,6 +164,7 @@ class Arm2ScoopingGrasp(Node):
         self.declare_parameter('last_detected_food_volume_m3', 0.0)
         self.declare_parameter('last_volume_check_selected_bowl_idx', -1)
         self.declare_parameter('last_volume_check_completed', False)
+        self.declare_parameter('volume_offset_ml', 10.0)  # Optional offset to add to the volume estimate (ml)
         # Last computed optimal tilt angle (deg). Exposed for the task_planner to read.
         self.declare_parameter('last_tilt_angle_deg', 0.0)
 
@@ -196,7 +197,7 @@ class Arm2ScoopingGrasp(Node):
         self.approach_z_offset = float(self.get_parameter('approach_z_offset').value)
         self.grasp_z_offset = float(self.get_parameter('grasp_z_offset').value)
         self.lift_z_offset = float(self.get_parameter('lift_z_offset').value)
-
+        self.volume_offset_ml = float(self.get_parameter('volume_offset_ml').value)
         self.gripper_open_pos = float(self.get_parameter('gripper_open_pos').value)
         self.gripper_close_pos = float(self.get_parameter('gripper_close_pos').value)
         self.gripper_speed = float(self.get_parameter('gripper_speed').value)
@@ -767,9 +768,9 @@ class Arm2ScoopingGrasp(Node):
         if ret != 0:
             return False, f'Failed to move to raised pose (code={ret}).'
 
-        ret = self._vibrate_arm()
-        if ret != 0:
-            return False, f'Failed to vibrate arm to level food (code={ret}).'
+        # ret = self._vibrate_arm()
+        # if ret != 0:
+        #     return False, f'Failed to vibrate arm to level food (code={ret}).'
 
         ret = self._move_to_mm(x_mm, y_mm, z_mm, roll, pitch, yaw)
         if ret != 0:
@@ -950,6 +951,10 @@ class Arm2ScoopingGrasp(Node):
             if not idle_ok:
                 return False, f'Volume-estimation pose completion check failed: {idle_err}'
 
+            # ret = self._vibrate_arm()
+            # if ret != 0:
+            #     return False, f'Failed to vibrate arm to level food (code={ret}).'
+
             time.sleep(3.0)  # Allow time for the camera to settle and capture a clear point-cloud
 
             # This service is intentionally called only after the xArm has reached
@@ -967,7 +972,7 @@ class Arm2ScoopingGrasp(Node):
 
             # food_mass_g = self._volume_mass_model.predict(volume_m3)
             # Convert volume_m3 to ml
-            volume_ml = volume_m3 * 1e6
+            volume_ml = volume_m3 * 1e6 + self.volume_offset_ml
 
             best_angle_deg = self._tilt_optimiser.get_optimal_tilt(volume_ml, self.target_scoop_ml)
             if best_angle_deg is None:
@@ -991,9 +996,9 @@ class Arm2ScoopingGrasp(Node):
             if ret != 0:
                 return False, f'Failed to move to tilt pose (code={ret}).'
 
-            ret = self._vibrate_arm()
-            if ret != 0:
-                return False, f'Failed to vibrate arm (code={ret}).'
+            # ret = self._vibrate_arm()
+            # if ret != 0:
+            #     return False, f'Failed to vibrate arm (code={ret}).'
 
             # Publish the computed angle so the task_planner can drive the lite6 trajectory.
             self._update_last_tilt_angle_param(best_angle_deg)
