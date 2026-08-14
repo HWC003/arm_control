@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import math
 import threading
 import time
@@ -161,9 +162,9 @@ class Arm2ScoopingGrasp(Node):
             [292.7, -54.2, 33.9, math.radians(-160.5), math.radians(-39.2), math.radians(-121.8)],
         )
         self.declare_parameter('minimum_food_volume_m3', 1.5e-5)
-        self.declare_parameter('last_detected_food_volume_m3', 0.0)
-        self.declare_parameter('last_volume_check_selected_bowl_idx', -1)
-        self.declare_parameter('last_volume_check_completed', False)
+        # ROS parameters do not support dictionaries directly, so per-bowl
+        # volume-check results are exposed as a JSON-encoded dictionary.
+        self.declare_parameter('volume_check_status_by_bowl_json', '{}')
         self.declare_parameter('volume_offset_ml', 10.0)  # Optional offset to add to the volume estimate (ml)
         # Last computed optimal tilt angle (deg). Exposed for the task_planner to read.
         self.declare_parameter('last_tilt_angle_deg', 0.0)
@@ -252,6 +253,7 @@ class Arm2ScoopingGrasp(Node):
         self._pending_auto_idx = None
         self._saved_init_pose_by_tag = {}
         self._last_successful_selected_bowl_idx = None
+        self._volume_check_status_by_bowl = {}
 
         self.tf_buffer = Buffer(cache_time=Duration(seconds=30.0))
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -546,12 +548,19 @@ class Arm2ScoopingGrasp(Node):
             )
 
     def _update_volume_check_status(self, selected_bowl_idx, volume_m3, completed):
-        """Publish a fresh volume result only after measurement at the fixed pose."""
+        """Store and publish the latest volume-check result for one bowl."""
+        bowl_key = int(selected_bowl_idx)
+        self._volume_check_status_by_bowl[bowl_key] = {
+            'last_detected_food_volume_m3': float(volume_m3),
+            'last_volume_check_completed': bool(completed),
+        }
+
         try:
             self.set_parameters([
-                Parameter('last_detected_food_volume_m3', value=float(volume_m3)),
-                Parameter('last_volume_check_selected_bowl_idx', value=int(selected_bowl_idx)),
-                Parameter('last_volume_check_completed', value=bool(completed)),
+                Parameter(
+                    'volume_check_status_by_bowl_json',
+                    value=json.dumps(self._volume_check_status_by_bowl, sort_keys=True),
+                ),
             ])
         except Exception as exc:
             self.get_logger().warning(
@@ -798,13 +807,13 @@ class Arm2ScoopingGrasp(Node):
         approach_6dof  = [429.1, 31.5, -77.7, math.radians(-168.7), math.radians(-44.4), math.radians(-88.7)]
 
         try:
-            # Prevent the manager from treating a previous bowl's measurement as
-            # the result for this grasp attempt.
-            self._update_volume_check_status(-1, 0.0, False)
-
             selected_idx, resolved_tag_id, map_error = self._resolve_selected_bowl_tag()
             if map_error is not None:
                 return False, map_error
+
+            # Mark only this bowl's result as pending while preserving the most
+            # recent results for every other bowl.
+            self._update_volume_check_status(selected_idx, 0.0, False)
 
             if resolved_tag_id < 0:
                 message = (
