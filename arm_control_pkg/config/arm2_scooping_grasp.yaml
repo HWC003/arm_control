@@ -33,7 +33,7 @@ arm2_scooping_grasp:
 
     gripper_open_pos: 850.0
     gripper_close_pos: 120.0
-    gripper_speed: 2000.0
+    gripper_speed: 5000.0
 
     # Tilt-bowl scooping is skipped when the volume measured at
     # volume_estimation_pose_6dof is below this threshold.
