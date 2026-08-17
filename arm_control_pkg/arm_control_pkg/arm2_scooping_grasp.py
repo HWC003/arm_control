@@ -811,6 +811,8 @@ class Arm2ScoopingGrasp(Node):
             if map_error is not None:
                 return False, map_error
 
+            # Save previous checked volume for this bowl before marking it as pending.
+            prev_volume_m3 = self._volume_check_status_by_bowl.get(selected_idx, {}).get('last_detected_food_volume_m3', 0.0)
             # Mark only this bowl's result as pending while preserving the most
             # recent results for every other bowl.
             self._update_volume_check_status(selected_idx, 0.0, False)
@@ -971,6 +973,29 @@ class Arm2ScoopingGrasp(Node):
             volume_m3, volume_err = self._call_get_bowl_food_ratio()
             if volume_m3 is None:
                 return False, f'Failed to estimate bowl food volume: {volume_err}'
+
+            for i in range(3):
+                if prev_volume_m3 > 0.0:
+                    if volume_m3 > prev_volume_m3:
+                        self.get_logger().warn(
+                            f'Detected food volume increased from {prev_volume_m3:.3e} m^3 to {volume_m3:.3e} m^3; '
+                            're-checking volume after a brief wait.'
+                        )
+                        time.sleep(1.0)
+                        volume_m3, volume_err = self._call_get_bowl_food_ratio()
+                        if volume_m3 is None:
+                            return False, f'Failed to estimate bowl food volume: {volume_err}'
+                    else:
+                        break
+                else:
+                    break
+            if prev_volume_m3 > 0.0 and volume_m3 > prev_volume_m3:
+                self.get_logger().warn(
+                    f'Detected food volume increased from {prev_volume_m3:.3e} m^3 to {volume_m3:.3e} m^3 after 3 checks; '
+                    'using the latest detected volume for tilt computation.'
+                )
+                volume_m3 = prev_volume_m3 - self.target_scoop_ml * 1e-6 
+
 
             self._update_volume_check_status(selected_idx, volume_m3, True)
             if volume_m3 < self.minimum_food_volume_m3:
