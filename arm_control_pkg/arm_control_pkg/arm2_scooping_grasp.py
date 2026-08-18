@@ -159,7 +159,7 @@ class Arm2ScoopingGrasp(Node):
         # Placeholder default reuses the final tilt pose; update with a real pose later.
         self.declare_parameter(
             'volume_estimation_pose_6dof',
-            [292.7, -54.2, 33.9, math.radians(-160.5), math.radians(-39.2), math.radians(-121.8)],
+            [242.1, -99.3, 74.1, math.radians(-164.4), math.radians(-40.7), math.radians(-116.1)],
         )
         self.declare_parameter('minimum_food_volume_m3', 1.5e-5)
         # ROS parameters do not support dictionaries directly, so per-bowl
