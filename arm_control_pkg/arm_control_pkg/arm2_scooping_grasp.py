@@ -254,6 +254,7 @@ class Arm2ScoopingGrasp(Node):
         self._saved_init_pose_by_tag = {}
         self._last_successful_selected_bowl_idx = None
         self._volume_check_status_by_bowl = {}
+        self._expected_volume_m3 = None
 
         self.tf_buffer = Buffer(cache_time=Duration(seconds=30.0))
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -813,6 +814,12 @@ class Arm2ScoopingGrasp(Node):
 
             # Save previous checked volume for this bowl before marking it as pending.
             prev_volume_m3 = self._volume_check_status_by_bowl.get(selected_idx, {}).get('last_detected_food_volume_m3', 0.0)
+            if prev_volume_m3 == 0.0:
+                self._expected_volume_m3 = 0.8e-4  # 100 ml in m^3
+                self.get_logger().info(
+                    f'No previous volume check for selected_bowl_idx={selected_idx}. '
+                    f'Setting expected volume to {self._expected_volume_m3*1e6:.3e} ml.'
+                )
             # Mark only this bowl's result as pending while preserving the most
             # recent results for every other bowl.
             self._update_volume_check_status(selected_idx, 0.0, False)
@@ -973,28 +980,57 @@ class Arm2ScoopingGrasp(Node):
             volume_m3, volume_err = self._call_get_bowl_food_ratio()
             if volume_m3 is None:
                 return False, f'Failed to estimate bowl food volume: {volume_err}'
+            self.get_logger().info(
+                f'Detected food volume for selected_bowl_idx={selected_idx} is {volume_m3:.3e} m^3')
+            
+            volume_m3 = volume_m3 + self.volume_offset_ml * 1e-6  # Convert offset from ml to m^3
 
             for i in range(3):
-                if prev_volume_m3 > 0.0:
-                    if volume_m3 > prev_volume_m3:
-                        self.get_logger().warn(
-                            f'Detected food volume increased from {prev_volume_m3:.3e} m^3 to {volume_m3:.3e} m^3; '
-                            're-checking volume after a brief wait.'
-                        )
-                        time.sleep(1.0)
-                        volume_m3, volume_err = self._call_get_bowl_food_ratio()
-                        if volume_m3 is None:
-                            return False, f'Failed to estimate bowl food volume: {volume_err}'
-                    else:
-                        break
+                if volume_m3 > self._expected_volume_m3 + 1e-5 or volume_m3 < self._expected_volume_m3 - 1e-5:
+                    self.get_logger().warn(
+                        f'Detected food volume (with offset) ({volume_m3:.3e} m^3) is not within expected range of +/- 1e-5m^3 of'
+                        f'({self._expected_volume_m3:.3e} m^3); re-checking volume after a brief wait.'
+                    )
+                    time.sleep(1.0)
+                    volume_m3, volume_err = self._call_get_bowl_food_ratio()
+                    if volume_m3 is None:
+                        return False, f'Failed to estimate bowl food volume: {volume_err}'
+                    volume_m3 = volume_m3 + self.volume_offset_ml * 1e-6
                 else:
+                    self.get_logger().info(
+                        f'Detected food volume (with offset) ({volume_m3:.3e} m^3) is within expected range of +/- 1e-5m^3 of'
+                        f'({self._expected_volume_m3:.3e} m^3); proceeding with tilt computation.'
+                    )
                     break
-            if prev_volume_m3 > 0.0 and volume_m3 > prev_volume_m3:
+            
+            if volume_m3 > self._expected_volume_m3 + 1e-5 or volume_m3 < self._expected_volume_m3 - 1e-5:
                 self.get_logger().warn(
-                    f'Detected food volume increased from {prev_volume_m3:.3e} m^3 to {volume_m3:.3e} m^3 after 3 checks; '
-                    'using the latest detected volume for tilt computation.'
+                    f'Detected food volume (with offset) ({volume_m3:.3e} m^3) is still not within expected range of +/- 1e-5m^3 of'
+                    f'({self._expected_volume_m3:.3e} m^3) after 3 checks; using the EXPECTED VOLUME for tilt computation.'
                 )
-                volume_m3 = prev_volume_m3 - self.target_scoop_ml * 1e-6 
+                volume_m3 = self._expected_volume_m3
+
+            # for i in range(3):
+            #     if prev_volume_m3 > 0.0:
+            #         if volume_m3 > prev_volume_m3:
+            #             self.get_logger().warn(
+            #                 f'Detected food volume increased from {prev_volume_m3:.3e} m^3 to {volume_m3:.3e} m^3; '
+            #                 're-checking volume after a brief wait.'
+            #             )
+            #             time.sleep(1.0)
+            #             volume_m3, volume_err = self._call_get_bowl_food_ratio()
+            #             if volume_m3 is None:
+            #                 return False, f'Failed to estimate bowl food volume: {volume_err}'
+            #         else:
+            #             break
+            #     else:
+            #         break
+            # if prev_volume_m3 > 0.0 and volume_m3 > prev_volume_m3:
+            #     self.get_logger().warn(
+            #         f'Detected food volume increased from {prev_volume_m3:.3e} m^3 to {volume_m3:.3e} m^3 after 3 checks; '
+            #         'using the latest detected volume for tilt computation.'
+            #     )
+            #     volume_m3 = prev_volume_m3 - self.target_scoop_ml * 1e-6 
 
 
             self._update_volume_check_status(selected_idx, volume_m3, True)
@@ -1006,7 +1042,7 @@ class Arm2ScoopingGrasp(Node):
 
             # food_mass_g = self._volume_mass_model.predict(volume_m3)
             # Convert volume_m3 to ml
-            volume_ml = volume_m3 * 1e6 + self.volume_offset_ml
+            volume_ml = volume_m3 * 1e6 #+ self.volume_offset_ml
 
             best_angle_deg = self._tilt_optimiser.get_optimal_tilt(volume_ml, self.target_scoop_ml)
             if best_angle_deg is None:
@@ -1043,6 +1079,8 @@ class Arm2ScoopingGrasp(Node):
                 return False, f'Grasp completion check failed: {idle_err}'
 
             self._last_successful_selected_bowl_idx = selected_idx
+
+            self._expected_volume_m3 = self._expected_volume_m3 - self.target_scoop_ml * 1e-6  # Update expected volume for next grasp
 
             return True, message
         except Exception as exc:
