@@ -423,6 +423,13 @@ class Arm2ScoopingGrasp(Node):
                         f'Pending auto execute for selected_bowl_idx={idx}.'
                     )
                     self._update_auto_execute_status_params()
+            elif param.name == 'expected_volume_m3':
+                try:
+                    self.init_expected_volume_m3 = float(param.value)
+                except Exception:
+                    result.successful = False
+                    result.reason = 'expected_volume_m3 must be a number.'
+                    return result
 
         return result
 
@@ -815,7 +822,7 @@ class Arm2ScoopingGrasp(Node):
             # Save previous checked volume for this bowl before marking it as pending.
             prev_volume_m3 = self._volume_check_status_by_bowl.get(selected_idx, {}).get('last_detected_food_volume_m3', 0.0)
             if prev_volume_m3 == 0.0:
-                self._expected_volume_m3[selected_idx] = 1e-4  # 100 ml in m^3
+                self._expected_volume_m3[selected_idx] = self.init_expected_volume_m3
                 self.get_logger().info(
                     f'No previous volume check for selected_bowl_idx={selected_idx}. '
                     f'Setting expected volume to {self._expected_volume_m3[selected_idx]*1e6:.3e} ml.'
