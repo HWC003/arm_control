@@ -267,7 +267,7 @@ class Arm2ScoopingGrasp(Node):
 
         # Adaptive tilt models: detected volume -> mass, and mass -> optimal tilt angle.
         # self._volume_mass_model = VolumeMassModel()
-        self._tilt_optimiser = TiltOptimiser()
+        self._tilt_optimiser = [TiltOptimiser(bowl_index=i) for i in range(3)]
 
         self._trigger_srv = self.create_service(
             Trigger,
@@ -1051,7 +1051,7 @@ class Arm2ScoopingGrasp(Node):
             # Convert volume_m3 to ml
             volume_ml = volume_m3 * 1e6 #+ self.volume_offset_ml
 
-            best_angle_deg = self._tilt_optimiser.get_optimal_tilt(volume_ml, self.target_scoop_ml)
+            best_angle_deg = self._tilt_optimiser[selected_idx].get_optimal_tilt(volume_ml, self.target_scoop_ml)
             if best_angle_deg is None:
                 return False, (
                     f'Tilt optimiser failed to compute an angle '
