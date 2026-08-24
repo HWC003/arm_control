@@ -162,6 +162,8 @@ class Arm2ScoopingGrasp(Node):
             [242.1, -99.3, 74.1, math.radians(-164.4), math.radians(-40.7), math.radians(-116.1)],
         )
         self.declare_parameter('minimum_food_volume_m3', 1.5e-5)
+
+        self.declare_parameter('init_expected_volume_m3', 1.5e-5)
         # ROS parameters do not support dictionaries directly, so per-bowl
         # volume-check results are exposed as a JSON-encoded dictionary.
         self.declare_parameter('volume_check_status_by_bowl_json', '{}')
@@ -215,6 +217,7 @@ class Arm2ScoopingGrasp(Node):
         self.minimum_food_volume_m3 = float(
             self.get_parameter('minimum_food_volume_m3').value
         )
+        self.init_expected_volume_m3 = float(self.get_parameter('init_expected_volume_m3').value)
 
         self.use_workspace_limits = bool(self.get_parameter('use_workspace_limits').value)
         self.workspace_min_xyz = list(self.get_parameter('workspace_min_xyz').value)
@@ -295,6 +298,7 @@ class Arm2ScoopingGrasp(Node):
             f"Started arm2 grasp node (robot_ip={self.robot_ip}, trigger={self.trigger_service_name}, "
             f"return_to_init={self.return_to_init_service_name}, "
             f"target_frame={self.target_frame}, bowl_idx_to_tag_id={self.bowl_idx_to_tag_id})"
+            f"with initial expected volume {self.init_expected_volume_m3:.6e} m^3."
         )
 
     @staticmethod
@@ -423,13 +427,19 @@ class Arm2ScoopingGrasp(Node):
                         f'Pending auto execute for selected_bowl_idx={idx}.'
                     )
                     self._update_auto_execute_status_params()
-            elif param.name == 'expected_volume_m3':
+            elif param.name == 'init_expected_volume_m3':
                 try:
-                    self.init_expected_volume_m3 = float(param.value)
+                    self.get_logger().info(f'Updating init_expected_volume_m3 to {param.value}')
+                    init_expected_volume_m3 = float(param.value)
                 except Exception:
                     result.successful = False
                     result.reason = 'expected_volume_m3 must be a number.'
                     return result
+
+                self.init_expected_volume_m3 = init_expected_volume_m3
+                self.get_logger().info(
+                    f'Updated init_expected_volume_m3 to {self.init_expected_volume_m3:.6e} m^3.'
+                )
 
         return result
 
@@ -889,19 +899,19 @@ class Arm2ScoopingGrasp(Node):
             else:
                 roll, pitch, yaw = self._get_orientation()
 
-            init_pose_6dof = [
-                x_m * 1000.0,
-                y_m * 1000.0,
-                z_m * 1000.0,
-                roll,
-                pitch,
-                yaw,
-            ]
-            self._saved_init_pose_by_tag[resolved_tag_id] = init_pose_6dof
-            self.get_logger().info(
-                f'Saved initial pose for tag_id={resolved_tag_id}: '
-                f'x={init_pose_6dof[0]:.1f}mm, y={init_pose_6dof[1]:.1f}mm, z={init_pose_6dof[2]:.1f}mm'
-            )
+            # init_pose_6dof = [
+            #     x_m * 1000.0,
+            #     y_m * 1000.0,
+            #     z_m * 1000.0,
+            #     roll,
+            #     pitch,
+            #     yaw,
+            # ]
+            # self._saved_init_pose_by_tag[resolved_tag_id] = init_pose_6dof
+            # self.get_logger().info(
+            #     f'Saved initial pose for tag_id={resolved_tag_id}: '
+            #     f'x={init_pose_6dof[0]:.1f}mm, y={init_pose_6dof[1]:.1f}mm, z={init_pose_6dof[2]:.1f}mm'
+            # )
 
             if selected_idx == self._last_successful_selected_bowl_idx:
                 skip_regrasp = True
@@ -916,6 +926,14 @@ class Arm2ScoopingGrasp(Node):
                 message = (f'selected_bowl_idx={selected_idx} matches previous successful grasp. '
                     'Skipping re-grasp motions and moving directly to final tilt pose.')
                 self.get_logger().info(message)
+                ret, init_pose_6dof = self.arm.get_position(is_radian=True)
+                if ret == 0 and init_pose_6dof is not None and len(init_pose_6dof) >= 6:
+                    self._saved_init_pose_by_tag[resolved_tag_id] = init_pose_6dof
+                    self.get_logger().info(
+                        f'Saved initial pose for tag_id={resolved_tag_id}: '
+                        f'x={init_pose_6dof[0]:.1f}mm, y={init_pose_6dof[1]:.1f}mm, z={init_pose_6dof[2]:.1f}mm'
+                    )
+                    x_mm, y_mm, z_grasp_mm, roll, pitch, yaw = init_pose_6dof
             else:
                 ret = self._set_gripper_position(self.gripper_open_pos)
                 if ret != 0:
@@ -957,6 +975,14 @@ class Arm2ScoopingGrasp(Node):
                     f'x={x_mm:.1f}mm, y={y_mm:.1f}mm, z={z_grasp_mm:.1f}mm'
                 )
                 self.get_logger().info(message)
+
+                ret, init_pose_6dof = self.arm.get_position(is_radian=True)
+                if ret == 0 and init_pose_6dof is not None and len(init_pose_6dof) >= 6:
+                    self._saved_init_pose_by_tag[resolved_tag_id] = init_pose_6dof
+                    self.get_logger().info(
+                        f'Saved initial pose for tag_id={resolved_tag_id}: '
+                        f'x={init_pose_6dof[0]:.1f}mm, y={init_pose_6dof[1]:.1f}mm, z={init_pose_6dof[2]:.1f}mm'
+                    )
 
             # TODO: RAISE BOWL UP FIRST
             # Raise the bowl vertically up first to avoid collisions during tilt
