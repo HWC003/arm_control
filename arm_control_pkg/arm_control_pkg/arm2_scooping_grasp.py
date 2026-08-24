@@ -1019,9 +1019,9 @@ class Arm2ScoopingGrasp(Node):
             volume_m3 = volume_m3 + self.volume_offset_ml * 1e-6  # Convert offset from ml to m^3
 
             for i in range(3):
-                if volume_m3 > self._expected_volume_m3[selected_idx] + 1e-5 or volume_m3 < self._expected_volume_m3[selected_idx] - 1e-5:
+                if volume_m3 > self._expected_volume_m3[selected_idx] + 5e-6 or volume_m3 < self._expected_volume_m3[selected_idx] - 5e-6:
                     self.get_logger().warn(
-                        f'Detected food volume (with offset) ({volume_m3:.3e} m^3) is not within expected range of +/- 1e-5m^3 of'
+                        f'Detected food volume (with offset) ({volume_m3:.3e} m^3) is not within expected range of +/- 5e-6m^3 of'
                         f'({self._expected_volume_m3[selected_idx]:.3e} m^3); re-checking volume after a brief wait.'
                     )
                     time.sleep(1.0)
@@ -1031,40 +1031,17 @@ class Arm2ScoopingGrasp(Node):
                     volume_m3 = volume_m3 + self.volume_offset_ml * 1e-6
                 else:
                     self.get_logger().info(
-                        f'Detected food volume (with offset) ({volume_m3:.3e} m^3) is within expected range of +/- 1e-5m^3 of'
+                        f'Detected food volume (with offset) ({volume_m3:.3e} m^3) is within expected range of +/- 5e-6m^3 of'
                         f'({self._expected_volume_m3[selected_idx]:.3e} m^3); proceeding with tilt computation.'
                     )
                     break
             
-            if volume_m3 > self._expected_volume_m3[selected_idx] + 1e-5 or volume_m3 < self._expected_volume_m3[selected_idx] - 1e-5:
+            if volume_m3 > self._expected_volume_m3[selected_idx] + 5e-6 or volume_m3 < self._expected_volume_m3[selected_idx] - 5e-6:
                 self.get_logger().warn(
-                    f'Detected food volume (with offset) ({volume_m3:.3e} m^3) is still not within expected range of +/- 1e-5m^3 of'
+                    f'Detected food volume (with offset) ({volume_m3:.3e} m^3) is still not within expected range of +/- 5e-6m^3 of'
                     f'({self._expected_volume_m3[selected_idx]:.3e} m^3) after 3 checks; using the EXPECTED VOLUME for tilt computation.'
                 )
                 volume_m3 = self._expected_volume_m3[selected_idx]
-
-            # for i in range(3):
-            #     if prev_volume_m3 > 0.0:
-            #         if volume_m3 > prev_volume_m3:
-            #             self.get_logger().warn(
-            #                 f'Detected food volume increased from {prev_volume_m3:.3e} m^3 to {volume_m3:.3e} m^3; '
-            #                 're-checking volume after a brief wait.'
-            #             )
-            #             time.sleep(1.0)
-            #             volume_m3, volume_err = self._call_get_bowl_food_ratio()
-            #             if volume_m3 is None:
-            #                 return False, f'Failed to estimate bowl food volume: {volume_err}'
-            #         else:
-            #             break
-            #     else:
-            #         break
-            # if prev_volume_m3 > 0.0 and volume_m3 > prev_volume_m3:
-            #     self.get_logger().warn(
-            #         f'Detected food volume increased from {prev_volume_m3:.3e} m^3 to {volume_m3:.3e} m^3 after 3 checks; '
-            #         'using the latest detected volume for tilt computation.'
-            #     )
-            #     volume_m3 = prev_volume_m3 - self.target_scoop_ml * 1e-6 
-
 
             self._update_volume_check_status(selected_idx, volume_m3, True)
             if volume_m3 < self.minimum_food_volume_m3:
