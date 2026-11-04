@@ -139,6 +139,11 @@ class Arm2ScoopingGrasp(Node):
         self.declare_parameter('motion_type', 0)
         self.declare_parameter('use_current_orientation', True)
         self.declare_parameter('target_orientation_rpy', [0.0, -1.571, 3.141])
+        # Safe pose (mm, rad) used before grasping and for recovery after failures.
+        self.declare_parameter(
+            'approach_pose_6dof',
+            [429.1, 31.5, -77.7, math.radians(-168.7), math.radians(-44.4), math.radians(-88.7)],
+        )
 
         # Point offsets (meters)
         self.declare_parameter('point_offset_xyz', [0.0, 0.0, 0.0])
@@ -195,6 +200,7 @@ class Arm2ScoopingGrasp(Node):
         self.motion_type = int(self.get_parameter('motion_type').value)
         self.use_current_orientation = bool(self.get_parameter('use_current_orientation').value)
         self.target_orientation_rpy = list(self.get_parameter('target_orientation_rpy').value)
+        self.approach_pose_6dof = [float(v) for v in self.get_parameter('approach_pose_6dof').value]
 
         self.point_offset_xyz = list(self.get_parameter('point_offset_xyz').value)
         self.approach_z_offset = float(self.get_parameter('approach_z_offset').value)
@@ -233,6 +239,8 @@ class Arm2ScoopingGrasp(Node):
 
         if len(self.target_orientation_rpy) != 3:
             raise ValueError('target_orientation_rpy must have exactly 3 values [roll, pitch, yaw].')
+        if len(self.approach_pose_6dof) != 6:
+            raise ValueError('approach_pose_6dof must have exactly 6 values [x, y, z, roll, pitch, yaw].')
         if len(self.point_offset_xyz) != 3:
             raise ValueError('point_offset_xyz must have exactly 3 values [x, y, z].')
         if len(self.workspace_min_xyz) != 3 or len(self.workspace_max_xyz) != 3:
@@ -822,7 +830,7 @@ class Arm2ScoopingGrasp(Node):
         if not self._grasp_lock.acquire(blocking=False):
             return False, 'Grasp already in progress.'
 
-        approach_6dof  = [429.1, 31.5, -77.7, math.radians(-168.7), math.radians(-44.4), math.radians(-88.7)]
+        approach_6dof = self.approach_pose_6dof
 
         try:
             selected_idx, resolved_tag_id, map_error = self._resolve_selected_bowl_tag()
