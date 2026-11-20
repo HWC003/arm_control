@@ -799,7 +799,8 @@ class Arm2ScoopingGrasp(Node):
             return False, f'Failed to keep gripper closed before return move (code={ret}).'
 
         # Add a few intermediate waypoints for a smoother return trajectory if obstacles are in the way (based on observed behavior during testing)
-        ret = self._move_to_mm(x_mm, y_mm + 100.0*math.sin(math.radians(-45)), z_mm + 100.0*math.cos(math.radians(-45)), roll, pitch, yaw)
+        # ret = self._move_to_mm(x_mm, y_mm + 100.0*math.sin(math.radians(-45)), z_mm + 100.0*math.cos(math.radians(-45)), roll, pitch, yaw)
+        ret=self._move_to_mm(x_mm, y_mm, z_mm + 100.0, roll, pitch, yaw)
         if ret != 0:
             return False, f'Failed to move to raised pose (code={ret}).'
 
@@ -996,7 +997,8 @@ class Arm2ScoopingGrasp(Node):
             # Raise the bowl vertically up first to avoid collisions during tilt
             # Coordinate frame is 45 deg rotated anticlockwise, so x is forward/backward, y is diagnal left/right, z is  diagonal up/down 
             # Move the arm up by 100mm vertically up first before tilting to reduce risk of collision with other bowls
-            ret=self._move_to_mm(x_mm, y_mm + 100.0*math.sin(math.radians(-45)), z_grasp_mm + 100.0*math.cos(math.radians(-45)), roll, pitch, yaw)
+            # ret=self._move_to_mm(x_mm, y_mm + 100.0*math.sin(math.radians(-45)), z_grasp_mm + 100.0*math.cos(math.radians(-45)), roll, pitch, yaw)
+            ret=self._move_to_mm(x_mm, y_mm, z_grasp_mm + 100.0, roll, pitch, yaw)
             if ret != 0:
                 return False, f'Failed to move to raised pose (code={ret}).'
 
