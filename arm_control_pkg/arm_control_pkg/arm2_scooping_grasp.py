@@ -151,6 +151,13 @@ class Arm2ScoopingGrasp(Node):
         self.declare_parameter('grasp_z_offset', 0.0)
         self.declare_parameter('lift_z_offset', 0.12)
 
+        # Tag-relative approach: the gripper (tool +Z) points along the tag -Y axis and
+        # travels tag_approach_distance (m) along it from a pre-grasp point into the grasp pose.
+        self.declare_parameter('use_tag_y_approach', False)
+        self.declare_parameter('tag_approach_distance', 0.08)
+        # Rotation (rad) of the gripper about the approach axis (sets finger-closing direction).
+        self.declare_parameter('tag_approach_roll', 0.0)
+
         # Gripper parameters
         self.declare_parameter('gripper_open_pos', 850.0)
         self.declare_parameter('gripper_close_pos', 120.0)
@@ -206,6 +213,9 @@ class Arm2ScoopingGrasp(Node):
         self.approach_z_offset = float(self.get_parameter('approach_z_offset').value)
         self.grasp_z_offset = float(self.get_parameter('grasp_z_offset').value)
         self.lift_z_offset = float(self.get_parameter('lift_z_offset').value)
+        self.use_tag_y_approach = bool(self.get_parameter('use_tag_y_approach').value)
+        self.tag_approach_distance = float(self.get_parameter('tag_approach_distance').value)
+        self.tag_approach_roll = float(self.get_parameter('tag_approach_roll').value)
         self.volume_offset_ml = float(self.get_parameter('volume_offset_ml').value)
         self.gripper_open_pos = float(self.get_parameter('gripper_open_pos').value)
         self.gripper_close_pos = float(self.get_parameter('gripper_close_pos').value)
@@ -236,6 +246,11 @@ class Arm2ScoopingGrasp(Node):
             or self.minimum_food_volume_m3 <= 0.0
         ):
             raise ValueError('minimum_food_volume_m3 must be finite and greater than zero.')
+
+        if not math.isfinite(self.tag_approach_distance) or self.tag_approach_distance <= 0.0:
+            raise ValueError('tag_approach_distance must be finite and greater than zero.')
+        if not math.isfinite(self.tag_approach_roll):
+            raise ValueError('tag_approach_roll must be finite.')
 
         if len(self.target_orientation_rpy) != 3:
             raise ValueError('target_orientation_rpy must have exactly 3 values [roll, pitch, yaw].')
@@ -328,7 +343,7 @@ class Arm2ScoopingGrasp(Node):
     def _lookup_apriltag_target_tf(self, target_tag_id: int):
         candidates = self._resolve_tag_frames(target_tag_id)
         if not candidates:
-            return None, None, None, 'No valid tag frame candidates from tag_frame_templates.'
+            return None, None, None, None, 'No valid tag frame candidates from tag_frame_templates.'
 
         last_error = None
         for tag_frame in candidates:
@@ -345,7 +360,7 @@ class Arm2ScoopingGrasp(Node):
                 age_sec = max(0.0, now_sec - stamp_sec) if stamp_sec > 0.0 else (self.apriltag_pose_max_age_sec + 1.0)
 
                 if self.apriltag_pose_max_age_sec > 0.0 and age_sec > self.apriltag_pose_max_age_sec:
-                    return None, None, None, (
+                    return None, None, None, None, (
                         f'AprilTag TF pose stale for {tag_frame}: age={age_sec:.3f}s '
                         f'(limit={self.apriltag_pose_max_age_sec:.3f}s).'
                     )
@@ -381,11 +396,11 @@ class Arm2ScoopingGrasp(Node):
                 )
                 target_q = quat_normalize(quat_multiply(tag_q, off_q))
 
-                return target_xyz, target_q, tag_frame, None
+                return target_xyz, target_q, tag_q, tag_frame, None
             except (LookupException, ConnectivityException, ExtrapolationException) as exc:
                 last_error = exc
 
-        return None, None, None, (
+        return None, None, None, None, (
             f'No transform available from tag candidates {candidates} to {self.target_frame}. '
             f'Last error: {last_error}'
         )
@@ -637,7 +652,40 @@ class Arm2ScoopingGrasp(Node):
             float(self.target_orientation_rpy[2]),
         )
 
-    def _move_to_mm(self, x_mm, y_mm, z_mm, roll, pitch, yaw):
+    def _compute_tag_y_approach(self, grasp_xyz_mm, tag_q):
+        """Pre-grasp pose for approaching the grasp point along the tag -Y axis.
+
+        The gripper orientation is built from the tag so that tool +Z (the xArm TCP
+        pointing direction) is aligned with tag -Y, rotated by tag_approach_roll about
+        that axis. The pre-grasp point lies tag_approach_distance behind the grasp
+        point on that axis, so a linear move from it drives the gripper straight
+        along the direction it is pointing.
+
+        Returns (pre_xyz_mm, (roll, pitch, yaw), y_dir_in_target_frame).
+        """
+        tag_q = quat_normalize(tag_q)
+        y_dir = rotate_vector_by_quat(tag_q, (0.0, -1.0, 0.0))
+
+        # R_x(+90deg) maps tool Z onto tag -Y; R_z(roll) spins about the approach axis.
+        grip_q = quat_multiply(tag_q, rpy_to_quat(math.pi / 2.0, 0.0, 0.0))
+        grip_q = quat_normalize(quat_multiply(grip_q, rpy_to_quat(0.0, 0.0, self.tag_approach_roll)))
+        rpy = quat_to_rpy(*grip_q)
+
+        d_mm = self.tag_approach_distance * 1000.0
+        pre_xyz_mm = tuple(float(g) - d_mm * float(v) for g, v in zip(grasp_xyz_mm, y_dir))
+        return pre_xyz_mm, rpy, y_dir
+
+    def _recover_to_approach_pose(self):
+        """Clear arm errors and move back to the safe approach pose."""
+        a = self.approach_pose_6dof
+        self.arm.clean_error()
+        self.arm.motion_enable(enable=True)
+        self.arm.set_state(0)
+        return self._move_to_mm(a[0], a[1], a[2], a[3], a[4], a[5])
+
+    def _move_to_mm(self, x_mm, y_mm, z_mm, roll, pitch, yaw, motion_type=None):
+        if motion_type is None:
+            motion_type = self.motion_type
         self.arm.set_state(0)
         ret = self.arm.set_position(
             x=float(x_mm),
@@ -649,7 +697,7 @@ class Arm2ScoopingGrasp(Node):
             speed=self.default_speed,
             mvacc=self.default_accel,
             wait=True,
-            motion_type=self.motion_type,
+            motion_type=int(motion_type),
         )
         return ret
 
@@ -864,12 +912,14 @@ class Arm2ScoopingGrasp(Node):
 
             apriltag_pose = None
             apriltag_quat = None
+            apriltag_raw_q = None
             apriltag_frame = None
             apriltag_error = None
             skip_regrasp = False
 
             for attempt in range(1, self.apriltag_request_retries + 2):
-                apriltag_pose, apriltag_quat, apriltag_frame, apriltag_error = self._lookup_apriltag_target_tf(
+                (apriltag_pose, apriltag_quat, apriltag_raw_q,
+                 apriltag_frame, apriltag_error) = self._lookup_apriltag_target_tf(
                     resolved_tag_id
                 )
                 if apriltag_pose is not None:
@@ -897,7 +947,20 @@ class Arm2ScoopingGrasp(Node):
                 + self.grasp_z_offset
             )
 
-            if self.use_apriltag_orientation:
+            pre_grasp_mm = None
+            if self.use_tag_y_approach:
+                # Gripper points along tag -Y; overrides the other orientation options.
+                pre_grasp_mm, (roll, pitch, yaw), tag_y_dir = self._compute_tag_y_approach(
+                    (x_m * 1000.0, y_m * 1000.0, z_m * 1000.0), apriltag_raw_q
+                )
+                self.get_logger().info(
+                    f'Tag-Y approach: tag -y axis in {self.target_frame}='
+                    f'({tag_y_dir[0]:.3f}, {tag_y_dir[1]:.3f}, {tag_y_dir[2]:.3f}), '
+                    f'pre-grasp x={pre_grasp_mm[0]:.1f}mm, y={pre_grasp_mm[1]:.1f}mm, z={pre_grasp_mm[2]:.1f}mm, '
+                    f'gripper roll={math.degrees(roll):.1f}deg, pitch={math.degrees(pitch):.1f}deg, '
+                    f'yaw={math.degrees(yaw):.1f}deg (overrides use_apriltag_orientation/use_current_orientation).'
+                )
+            elif self.use_apriltag_orientation:
                 q = apriltag_quat
                 roll, pitch, yaw = quat_to_rpy(
                     float(q[0]),
@@ -960,20 +1023,52 @@ class Arm2ScoopingGrasp(Node):
                         f'Target outside workspace limits: x={x_mm:.1f}, y={y_mm:.1f}, z={z_grasp_mm:.1f} mm'
                     )
 
+                if pre_grasp_mm is not None:
+                    # Move to the waypoint behind the grasp pose on the tag -Y axis,
+                    # already oriented so the gripper points at the grasp pose.
+                    if not self._within_workspace(*pre_grasp_mm):
+                        return False, (
+                            f'Pre-grasp outside workspace limits: x={pre_grasp_mm[0]:.1f}, '
+                            f'y={pre_grasp_mm[1]:.1f}, z={pre_grasp_mm[2]:.1f} mm'
+                        )
+
+                    ret = self._move_to_mm(pre_grasp_mm[0], pre_grasp_mm[1], pre_grasp_mm[2], roll, pitch, yaw)
+                    if ret != 0:
+                        rec = self._recover_to_approach_pose()
+                        return False, (
+                            f'Failed to move to pre-grasp pose (code={ret}); '
+                            f'recovery to approach pose returned code={rec}.'
+                        )
+
+                    self.get_logger().info(
+                        f'Moved to pre-grasp pose using {source_name} at {self.target_frame}: '
+                        f'x={pre_grasp_mm[0]:.1f}mm, y={pre_grasp_mm[1]:.1f}mm, z={pre_grasp_mm[2]:.1f}mm'
+                    )
+
                 self.get_logger().info(
                     f'Executing grasp using {source_name} at {self.target_frame}: '
                     f'x={x_mm:.1f}mm, y={y_mm:.1f}mm, z={z_grasp_mm:.1f}mm, '
                     f'roll={math.degrees(roll):.1f}deg, pitch={math.degrees(pitch):.1f}deg, yaw={math.degrees(yaw):.1f}deg'
                 )
 
-                ret = self._move_to_mm(x_mm, y_mm, z_grasp_mm, roll, pitch, yaw)
+                if pre_grasp_mm is not None:
+                    # Force linear Cartesian motion so the gripper travels straight along tag -Y.
+                    ret = self._move_to_mm(x_mm, y_mm, z_grasp_mm, roll, pitch, yaw, motion_type=0)
+                else:
+                    ret = self._move_to_mm(x_mm, y_mm, z_grasp_mm, roll, pitch, yaw)
                 if ret != 0:
-                    #Clear error and move back to approach pose to avoid collision with bowl
+                    # Clear error and back out (via pre-grasp, if used) to avoid colliding with the bowl.
                     self.arm.clean_error()
-                    self.arm.motion_enable(enable=True) 
+                    self.arm.motion_enable(enable=True)
                     self.arm.set_state(0)
-                    ret = self._move_to_mm(approach_6dof[0], approach_6dof[1], approach_6dof[2], approach_6dof[3], approach_6dof[4], approach_6dof[5])
-                    return False, f'Failed to move to grasp pose (code={ret}).'
+                    if pre_grasp_mm is not None:
+                        self._move_to_mm(pre_grasp_mm[0], pre_grasp_mm[1], pre_grasp_mm[2],
+                                         roll, pitch, yaw, motion_type=0)
+                    rec = self._recover_to_approach_pose()
+                    return False, (
+                        f'Failed to move to grasp pose (code={ret}); '
+                        f'recovery to approach pose returned code={rec}.'
+                    )
 
                 ret = self._set_gripper_position(self.gripper_close_pos)
                 if ret != 0:
@@ -995,7 +1090,9 @@ class Arm2ScoopingGrasp(Node):
 
             # TODO: RAISE BOWL UP FIRST
             # Raise the bowl vertically up first to avoid collisions during tilt
-            # Coordinate frame is 45 deg rotated anticlockwise, so x is forward/backward, y is diagnal left/right, z is  diagonal up/down 
+
+            # THIS IS FOR XARM6-LITE6 CONFIG ONLY - Coordinate frame is 45 deg rotated anticlockwise, so x is forward/backward, y is diagnal left/right, z is  diagonal up/down 
+            
             # Move the arm up by 100mm vertically up first before tilting to reduce risk of collision with other bowls
             # ret=self._move_to_mm(x_mm, y_mm + 100.0*math.sin(math.radians(-45)), z_grasp_mm + 100.0*math.cos(math.radians(-45)), roll, pitch, yaw)
             ret=self._move_to_mm(x_mm, y_mm, z_grasp_mm + 100.0, roll, pitch, yaw)
